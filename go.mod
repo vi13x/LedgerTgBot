@@ -1,8 +1,5 @@
-module bank-bot
+module github.com/vi13x/bank-lite-cli
 
-go 1.24.5
+go 1.22.0
 
-require (
-	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
-	github.com/lib/pq v1.10.9
-)
+require golang.org/x/crypto v0.27.0
