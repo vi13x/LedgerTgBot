@@ -1,5 +1,5 @@
-module github.com/vi13x/bank-lite-cli
+module bank-lite-cli
 
-go 1.22.0
+go 1.22
 
 require golang.org/x/crypto v0.27.0

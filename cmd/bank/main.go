@@ -6,12 +6,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	_ "strings"
 	"time"
 
-	"github.com/vi13x/bank-lite-cli/internal/cli"
-	"github.com/vi13x/bank-lite-cli/internal/service"
-	"github.com/vi13x/bank-lite-cli/internal/storage"
+	"bank-lite-cli/internal/cli"
+	"bank-lite-cli/internal/service"
+	"bank-lite-cli/internal/storage"
 )
 
 func main() {
@@ -20,6 +19,8 @@ func main() {
 		log.Fatalf("create data dir: %v", err)
 	}
 	dbPath := filepath.Join(dataDir, "bank.json")
+	backupsDir := filepath.Join(dataDir, "backups")
+	ratesPath := filepath.Join(dataDir, "rates.json")
 
 	store, err := storage.OpenFileDB(dbPath)
 	if err != nil {
@@ -27,7 +28,18 @@ func main() {
 	}
 	defer store.Close()
 
-	bank := service.NewBank(store)
+	if err := os.MkdirAll(backupsDir, 0o755); err != nil {
+		log.Fatalf("backups dir: %v", err)
+	}
+	if err := storage.EnsureRatesFile(ratesPath); err != nil {
+		log.Fatalf("rates init: %v", err)
+	}
+
+	bank := service.NewBank(store, ratesPath, backupsDir)
+	if err := bank.EnsureDefaultAdmin(); err != nil {
+		log.Fatalf("admin init: %v", err)
+	}
+
 	ui := cli.NewUI(bank, bufio.NewReader(os.Stdin), os.Stdout)
 
 	printBanner()
@@ -42,7 +54,11 @@ func main() {
 		case cli.ModeLogin:
 			user := ui.HandleLogin()
 			if user != nil {
-				ui.HandleSession(user)
+				if user.Role == "admin" {
+					ui.HandleAdmin(user)
+				} else {
+					ui.HandleSession(user)
+				}
 			}
 		default:
 			fmt.Fprintln(os.Stdout, "Неизвестный режим")
@@ -61,7 +77,7 @@ func defaultDataDir() string {
 func printBanner() {
 	fmt.Println(
 		"==============================",
-		" BANK LITE CLI",
+		"BANK LITE CLI",
 		"==============================",
 	)
 	fmt.Println("Время:", time.Now().Format(time.RFC1123))

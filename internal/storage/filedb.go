@@ -1,4 +1,3 @@
-
 package storage
 
 import (
@@ -12,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vi13x/bank-lite-cli/internal/domain"
+	"bank-lite-cli/internal/domain"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -23,6 +22,8 @@ type FileDB struct {
 	snap *domain.Snapshot
 	path string
 }
+
+func (db *FileDB) Path() string { return db.path }
 
 func OpenFileDB(path string) (*FileDB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -49,10 +50,10 @@ func (db *FileDB) load() error {
 	}
 	if info.Size() == 0 {
 		db.snap = &domain.Snapshot{
-			Version:  1,
-			Users:    map[domain.UserID]*domain.User{},
-			Accounts: map[domain.AccountID]*domain.Account{},
-			Txs:      map[domain.TxID]*domain.Transaction{},
+			Version:   1,
+			Users:     map[domain.UserID]*domain.User{},
+			Accounts:  map[domain.AccountID]*domain.Account{},
+			Txs:       map[domain.TxID]*domain.Transaction{},
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
@@ -76,7 +77,6 @@ func (db *FileDB) flushLocked() error {
 	if err := enc.Encode(db.snap); err != nil {
 		return err
 	}
-	// truncate in case new content is shorter
 	pos, _ := db.file.Seek(0, io.SeekCurrent)
 	if err := db.file.Truncate(pos); err != nil {
 		return err
@@ -138,7 +138,9 @@ func (db *FileDB) GetUserByUsername(username string) (*domain.User, error) {
 		}
 		return nil
 	})
-	if out == nil { return nil, ErrNotFound }
+	if out == nil {
+		return nil, ErrNotFound
+	}
 	return out, nil
 }
 
@@ -151,7 +153,9 @@ func (db *FileDB) GetUser(id domain.UserID) (*domain.User, error) {
 		}
 		return nil
 	})
-	if out == nil { return nil, ErrNotFound }
+	if out == nil {
+		return nil, ErrNotFound
+	}
 	return out, nil
 }
 
@@ -178,6 +182,17 @@ func (db *FileDB) UpdateAccount(ctx context.Context, a *domain.Account) error {
 	})
 }
 
+func (db *FileDB) CloseAccount(ctx context.Context, id domain.AccountID) error {
+	return db.withWrite(ctx, func(s *domain.Snapshot) error {
+		a, ok := s.Accounts[id]
+		if !ok {
+			return ErrNotFound
+		}
+		a.Closed = true
+		return nil
+	})
+}
+
 func (db *FileDB) GetAccount(id domain.AccountID) (*domain.Account, error) {
 	var out *domain.Account
 	db.withRead(func(s *domain.Snapshot) error {
@@ -187,7 +202,9 @@ func (db *FileDB) GetAccount(id domain.AccountID) (*domain.Account, error) {
 		}
 		return nil
 	})
-	if out == nil { return nil, ErrNotFound }
+	if out == nil {
+		return nil, ErrNotFound
+	}
 	return out, nil
 }
 
@@ -226,9 +243,8 @@ func (db *FileDB) ListTxByAccount(aid domain.AccountID, limit int) ([]*domain.Tr
 		}
 		return nil
 	})
-	// naive order by CreatedAt asc, then trim
 	for i := 0; i < len(out); i++ {
-		for j := i+1; j < len(out); j++ {
+		for j := i + 1; j < len(out); j++ {
 			if out[i].CreatedAt.After(out[j].CreatedAt) {
 				out[i], out[j] = out[j], out[i]
 			}
@@ -243,14 +259,7 @@ func (db *FileDB) ListTxByAccount(aid domain.AccountID, limit int) ([]*domain.Tr
 // ID generators
 func (db *FileDB) NextIDs() (user, acc, tx int64) {
 	var u, a, t int64
-	db.withRead(func(s *domain.Snapshot) error {
-		u, a, t = s.NextUser+1, s.NextAcc+1, s.NextTx+1
-		return nil
-	})
-	// bump and persist
-	_ = db.withWrite(context.Background(), func(s *domain.Snapshot) error {
-		s.NextUser, s.NextAcc, s.NextTx = u, a, t
-		return nil
-	})
+	db.withRead(func(s *domain.Snapshot) error { u, a, t = s.NextUser+1, s.NextAcc+1, s.NextTx+1; return nil })
+	_ = db.withWrite(context.Background(), func(s *domain.Snapshot) error { s.NextUser, s.NextAcc, s.NextTx = u, a, t; return nil })
 	return u, a, t
 }

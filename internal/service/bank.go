@@ -1,4 +1,3 @@
-
 package service
 
 import (
@@ -10,8 +9,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/vi13x/bank-lite-cli/internal/domain"
-	"github.com/vi13x/bank-lite-cli/internal/storage"
+	"bank-lite-cli/internal/domain"
+	"bank-lite-cli/internal/storage"
 )
 
 type Bank struct {
@@ -58,7 +57,9 @@ func (b *Bank) Login(username, password string) (*domain.User, error) {
 }
 
 func (b *Bank) CreateAccount(ctx context.Context, owner domain.UserID, currency string) (*domain.Account, error) {
-	if currency == "" { currency = "RUB" }
+	if currency == "" {
+		currency = "RUB"
+	}
 	_, accID, _ := b.store.NextIDs()
 	a := &domain.Account{
 		ID:        domain.AccountID(fmt.Sprintf("a%06d", accID)),
@@ -67,53 +68,89 @@ func (b *Bank) CreateAccount(ctx context.Context, owner domain.UserID, currency 
 		Balance:   0,
 		CreatedAt: time.Now(),
 	}
-	if err := b.store.CreateAccount(ctx, a); err != nil { return nil, err }
+	if err := b.store.CreateAccount(ctx, a); err != nil {
+		return nil, err
+	}
 	return a, nil
 }
 
 func (b *Bank) Deposit(ctx context.Context, aid domain.AccountID, amount int64, note string) (*domain.Transaction, error) {
-	if amount <= 0 { return nil, fmt.Errorf("сумма должна быть > 0") }
+	if amount <= 0 {
+		return nil, fmt.Errorf("сумма должна быть > 0")
+	}
 	a, err := b.store.GetAccount(aid)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	a.Balance += amount
-	if err := b.store.UpdateAccount(ctx, a); err != nil { return nil, err }
+	if err := b.store.UpdateAccount(ctx, a); err != nil {
+		return nil, err
+	}
 	_, _, txID := b.store.NextIDs()
 	id := domain.TxID(fmt.Sprintf("t%06d", txID))
 	t := &domain.Transaction{ID: id, Type: domain.TxDeposit, To: &a.ID, Amount: amount, Currency: a.Currency, Note: note, CreatedAt: time.Now()}
-	if err := b.store.CreateTx(ctx, t); err != nil { return nil, err }
+	if err := b.store.CreateTx(ctx, t); err != nil {
+		return nil, err
+	}
 	return t, nil
 }
 
 func (b *Bank) Withdraw(ctx context.Context, aid domain.AccountID, amount int64, note string) (*domain.Transaction, error) {
-	if amount <= 0 { return nil, fmt.Errorf("сумма должна быть > 0") }
+	if amount <= 0 {
+		return nil, fmt.Errorf("сумма должна быть > 0")
+	}
 	a, err := b.store.GetAccount(aid)
-	if err != nil { return nil, err }
-	if a.Balance < amount { return nil, fmt.Errorf("недостаточно средств") }
+	if err != nil {
+		return nil, err
+	}
+	if a.Balance < amount {
+		return nil, fmt.Errorf("недостаточно средств")
+	}
 	a.Balance -= amount
-	if err := b.store.UpdateAccount(ctx, a); err != nil { return nil, err }
+	if err := b.store.UpdateAccount(ctx, a); err != nil {
+		return nil, err
+	}
 	_, _, txID := b.store.NextIDs()
 	id := domain.TxID(fmt.Sprintf("t%06d", txID))
 	t := &domain.Transaction{ID: id, Type: domain.TxWithdraw, From: &a.ID, Amount: amount, Currency: a.Currency, Note: note, CreatedAt: time.Now()}
-	if err := b.store.CreateTx(ctx, t); err != nil { return nil, err }
+	if err := b.store.CreateTx(ctx, t); err != nil {
+		return nil, err
+	}
 	return t, nil
 }
 
 func (b *Bank) Transfer(ctx context.Context, from, to domain.AccountID, amount int64, note string) (*domain.Transaction, error) {
-	if amount <= 0 { return nil, fmt.Errorf("сумма должна быть > 0") }
+	if amount <= 0 {
+		return nil, fmt.Errorf("сумма должна быть > 0")
+	}
 	fa, err := b.store.GetAccount(from)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	ta, err := b.store.GetAccount(to)
-	if err != nil { return nil, err }
-	if fa.Currency != ta.Currency { return nil, errors.New("валюты счетов не совпадают") }
-	if fa.Balance < amount { return nil, fmt.Errorf("недостаточно средств") }
+	if err != nil {
+		return nil, err
+	}
+	if fa.Currency != ta.Currency {
+		return nil, errors.New("валюты счетов не совпадают")
+	}
+	if fa.Balance < amount {
+		return nil, fmt.Errorf("недостаточно средств")
+	}
 	fa.Balance -= amount
 	ta.Balance += amount
-	if err := b.store.UpdateAccount(ctx, fa); err != nil { return nil, err }
-	if err := b.store.UpdateAccount(ctx, ta); err != nil { return nil, err }
+	if err := b.store.UpdateAccount(ctx, fa); err != nil {
+		return nil, err
+	}
+	if err := b.store.UpdateAccount(ctx, ta); err != nil {
+		return nil, err
+	}
 	_, _, txID := b.store.NextIDs()
 	id := domain.TxID(fmt.Sprintf("t%06d", txID))
 	t := &domain.Transaction{ID: id, Type: domain.TxTransfer, From: &fa.ID, To: &ta.ID, Amount: amount, Currency: fa.Currency, Note: note, CreatedAt: time.Now()}
-	if err := b.store.CreateTx(ctx, t); err != nil { return nil, err }
+	if err := b.store.CreateTx(ctx, t); err != nil {
+		return nil, err
+	}
 	return t, nil
 }
 

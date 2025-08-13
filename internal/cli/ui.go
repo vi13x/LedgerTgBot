@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vi13x/bank-lite-cli/internal/domain"
-	"github.com/vi13x/bank-lite-cli/internal/service"
+	"bank-lite-cli/internal/domain"
+	"bank-lite-cli/internal/service"
 )
 
 type Mode int
