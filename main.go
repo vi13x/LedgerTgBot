@@ -1,17 +1,26 @@
+// Telegram Miner Simulator Bot — Single file, no external libs
+// Changes:
+// - Currency switched to USDT
+// - New users start with 100 USDT
+// - Clean UI with inline buttons (no need to type commands)
+// - Self-cleaning: bot keeps only one live UI message per chat (deletes/edits the previous)
+// - Bug fixes & hardening (locks, callback handling, message editing/deleting)
+//
+// Run:
+//   export TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+//   go run main.go
+
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	_ "io"
 	"log"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
-	_ "path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,10 +31,13 @@ const (
 	apiBase       = "https://api.telegram.org/bot"
 	dataDir       = "data"
 	usersFile     = "data/users.json"
-	ratesDecimals = 8 // for formatting MNT amounts
+	ratesDecimals = 8 // for formatting small amounts (rates/earnings)
 
 	shopPageSize = 10
 	miningWindow = 3 * time.Hour // passive accrual window length
+
+	startBalance = 100.0
+	currency     = "USDT"
 )
 
 // --- Telegram API payloads ---
@@ -74,13 +86,24 @@ type CallbackQry struct {
 	Message *Message `json:"message"`
 }
 
+// --- Inline keyboard structures ---
+
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
+}
+
+type InlineKeyboardButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data,omitempty"`
+}
+
 // --- Game data ---
 
 type GPU struct {
 	ID    int     `json:"id"`
 	Name  string  `json:"name"`
-	Rate  float64 `json:"rate"`  // MNT per second
-	Price float64 `json:"price"` // MNT
+	Rate  float64 `json:"rate"`  // USDT per second
+	Price float64 `json:"price"` // USDT
 }
 
 type User struct {
@@ -91,6 +114,7 @@ type User struct {
 	CreatedAt       time.Time `json:"created_at"`
 	LastAccrualAt   time.Time `json:"last_accrual_at"`
 	MiningWindowEnd time.Time `json:"mining_window_end"`
+	LastBotMsgID    int       `json:"last_bot_msg_id"` // for self-cleaning UI
 }
 
 type Store struct {
@@ -151,8 +175,8 @@ func loadOrInitStore() {
 }
 
 func saveStore() {
-	storeMu.RLock()
-	defer storeMu.RUnlock()
+	storeMu.Lock()
+	defer storeMu.Unlock()
 	mustWriteJSON(usersFile, store)
 }
 
@@ -167,7 +191,7 @@ func mustWriteJSON(path string, v any) {
 	if err := enc.Encode(v); err != nil {
 		log.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 	if err := os.Rename(tmp, path); err != nil {
 		log.Fatal(err)
 	}
@@ -175,9 +199,7 @@ func mustWriteJSON(path string, v any) {
 
 // --- Telegram transport ---
 
-func apiURL(method string) string {
-	return apiBase + botToken + "/" + method
-}
+func apiURL(method string) string { return apiBase + botToken + "/" + method }
 
 func getUpdates(offset int, timeoutSec int) ([]Update, error) {
 	form := url.Values{}
@@ -200,19 +222,73 @@ func getUpdates(offset int, timeoutSec int) ([]Update, error) {
 	return ur.Result, nil
 }
 
-func sendMessage(chatID int64, text string) error {
+func sendMessage(chatID int64, text string, kb *InlineKeyboardMarkup) (*Message, error) {
 	data := url.Values{}
 	data.Set("chat_id", strconv.FormatInt(chatID, 10))
 	data.Set("text", text)
 	data.Set("parse_mode", "Markdown")
+	if kb != nil {
+		b, _ := json.Marshal(kb)
+		data.Set("reply_markup", string(b))
+	}
 	resp, err := client.PostForm(apiURL("sendMessage"), data)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	var sr SendMessageResp
-	_ = json.NewDecoder(resp.Body).Decode(&sr)
-	return nil
+	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
+		return nil, err
+	}
+	if !sr.OK || sr.Result == nil {
+		return nil, fmt.Errorf("sendMessage failed")
+	}
+	return sr.Result, nil
+}
+
+func editMessage(chatID int64, messageID int, text string, kb *InlineKeyboardMarkup) error {
+	data := url.Values{}
+	data.Set("chat_id", strconv.FormatInt(chatID, 10))
+	data.Set("message_id", strconv.Itoa(messageID))
+	data.Set("text", text)
+	data.Set("parse_mode", "Markdown")
+	if kb != nil {
+		b, _ := json.Marshal(kb)
+		data.Set("reply_markup", string(b))
+	}
+	_, err := client.PostForm(apiURL("editMessageText"), data)
+	return err
+}
+
+func deleteMessage(chatID int64, messageID int) error {
+	data := url.Values{}
+	data.Set("chat_id", strconv.FormatInt(chatID, 10))
+	data.Set("message_id", strconv.Itoa(messageID))
+	_, err := client.PostForm(apiURL("deleteMessage"), data)
+	return err
+}
+
+func answerCallback(id string) {
+	data := url.Values{}
+	data.Set("callback_query_id", id)
+	_, _ = client.PostForm(apiURL("answerCallbackQuery"), data)
+}
+
+// sendOrReplace ensures only one bot message is kept (self-cleaning UI)
+func sendOrReplace(u *User, chatID int64, text string, kb *InlineKeyboardMarkup) {
+	// Try to edit existing message; if fails, delete & send a new one
+	if u.LastBotMsgID != 0 {
+		if err := editMessage(chatID, u.LastBotMsgID, text, kb); err == nil {
+			saveStore()
+			return
+		}
+		_ = deleteMessage(chatID, u.LastBotMsgID)
+	}
+	msg, err := sendMessage(chatID, text, kb)
+	if err == nil && msg != nil {
+		u.LastBotMsgID = msg.MessageID
+		saveStore()
+	}
 }
 
 // --- Long polling loop ---
@@ -231,13 +307,13 @@ func runLongPolling() {
 			if up.Message != nil {
 				handleMessage(up.Message)
 			} else if up.Callback != nil {
-				// Not used in this minimal version
+				handleCallback(up.Callback)
 			}
 		}
 	}
 }
 
-// --- Command handling ---
+// --- Command & UI handling ---
 
 func handleMessage(m *Message) {
 	if m.Chat == nil || m.From == nil {
@@ -246,30 +322,23 @@ func handleMessage(m *Message) {
 	chatID := m.Chat.ID
 	userID := m.From.ID
 	text := strings.TrimSpace(m.Text)
-	if text == "" {
-		return
-	}
 
-	// ensure user exists & accrue on any interaction
 	u := ensureUser(userID, m.From.Username)
 	accrueOnInteraction(u)
 	saveStore()
 
+	// Support /start and any text -> show menu UI
 	switch {
 	case strings.HasPrefix(text, "/start"):
-		_ = sendMessage(chatID, welcomeText(u))
+		showMainMenu(u, chatID)
 	case strings.HasPrefix(text, "/help"):
-		_ = sendMessage(chatID, helpText())
+		showHelp(u, chatID)
 	case strings.HasPrefix(text, "/balance"):
-		_ = sendMessage(chatID, fmt.Sprintf("Ваш баланс: *%s MNT*\nСкорость добычи: *%s MNT/сек*", fmtAmt(u.Balance), fmtAmt(totalRate(u))))
+		showBalance(u, chatID)
 	case strings.HasPrefix(text, "/mine"):
-		left := time.Until(u.MiningWindowEnd)
-		if left < 0 {
-			left = 0
-		}
-		_ = sendMessage(chatID, fmt.Sprintf("Добыча активна. Окно пассивной добычи истечет через: *%s*\nТекущая скорость: *%s MNT/сек*", durShort(left), fmtAmt(totalRate(u))))
+		showMine(u, chatID)
 	case strings.HasPrefix(text, "/inventory"):
-		_ = sendMessage(chatID, inventoryText(u))
+		showInventory(u, chatID)
 	case strings.HasPrefix(text, "/shop"):
 		page := 1
 		parts := strings.Fields(text)
@@ -278,63 +347,220 @@ func handleMessage(m *Message) {
 				page = p
 			}
 		}
-		_ = sendMessage(chatID, shopPageText(page))
+		showShop(u, chatID, page)
 	case strings.HasPrefix(text, "/buy"):
 		parts := strings.Fields(text)
 		if len(parts) < 2 {
-			_ = sendMessage(chatID, "Использование: /buy <ID>")
+			showInfo(u, chatID, "Использование: /buy <ID>")
 			return
 		}
 		id, err := strconv.Atoi(parts[1])
 		if err != nil {
-			_ = sendMessage(chatID, "Неверный ID")
+			showInfo(u, chatID, "Неверный ID")
 			return
 		}
 		msg := buyGPU(u, id)
-		_ = sendMessage(chatID, msg)
+		showInfo(u, chatID, msg)
 	case strings.HasPrefix(text, "/sell"):
 		parts := strings.Fields(text)
 		if len(parts) < 2 {
-			_ = sendMessage(chatID, "Использование: /sell <ID>")
+			showInfo(u, chatID, "Использование: /sell <ID>")
 			return
 		}
 		id, err := strconv.Atoi(parts[1])
 		if err != nil {
-			_ = sendMessage(chatID, "Неверный ID")
+			showInfo(u, chatID, "Неверный ID")
 			return
 		}
 		msg := sellGPU(u, id)
-		_ = sendMessage(chatID, msg)
+		showInfo(u, chatID, msg)
 	case strings.HasPrefix(text, "/reset"):
 		resetUser(u)
-		_ = sendMessage(chatID, "Аккаунт сброшен. Ваш баланс 0 MNT, инвентарь пуст. /shop для покупок.")
+		showInfo(u, chatID, "Аккаунт сброшен. Ваш баланс 0 USDT, инвентарь пуст.")
 	default:
-		_ = sendMessage(chatID, "Неизвестная команда. Напишите /help")
+		showMainMenu(u, chatID)
 	}
-	// persist after command
 	saveStore()
 }
 
-func welcomeText(u *User) string {
-	b := &bytes.Buffer{}
-	fmt.Fprintf(b, "👋 Добро пожаловать в *GPU Miner Simulator*!\n\n")
-	fmt.Fprintf(b, "Ваш баланс: *%s MNT*\nСкорость добычи: *%s MNT/сек*\n\n", fmtAmt(u.Balance), fmtAmt(totalRate(u)))
-	fmt.Fprintf(b, "Пассивная добыча продолжается *%s* после последнего визита. Возвращайтесь чаще!\n\n", durShort(miningWindow))
-	fmt.Fprintf(b, "Команды:\n%s", helpText())
-	return b.String()
+func handleCallback(cb *CallbackQry) {
+	if cb.From == nil || cb.Message == nil {
+		return
+	}
+	chatID := cb.Message.Chat.ID
+	u := ensureUser(cb.From.ID, cb.From.Username)
+	accrueOnInteraction(u)
+	saveStore()
+
+	data := cb.Data
+	answerCallback(cb.ID)
+
+	switch {
+	case data == "menu":
+		showMainMenu(u, chatID)
+	case data == "help":
+		showHelp(u, chatID)
+	case data == "balance":
+		showBalance(u, chatID)
+	case data == "mine":
+		showMine(u, chatID)
+	case strings.HasPrefix(data, "shop"):
+		page := 1
+		parts := strings.Split(data, ":")
+		if len(parts) == 2 {
+			if p, err := strconv.Atoi(parts[1]); err == nil && p > 0 {
+				page = p
+			}
+		}
+		showShop(u, chatID, page)
+	case strings.HasPrefix(data, "buy:"):
+		id, _ := strconv.Atoi(strings.TrimPrefix(data, "buy:"))
+		msg := buyGPU(u, id)
+		showInfo(u, chatID, msg)
+	case data == "inventory":
+		showInventory(u, chatID)
+	case strings.HasPrefix(data, "sell:"):
+		id, _ := strconv.Atoi(strings.TrimPrefix(data, "sell:"))
+		msg := sellGPU(u, id)
+		showInfo(u, chatID, msg)
+	case data == "reset":
+		resetUser(u)
+		showInfo(u, chatID, "Аккаунт сброшен. Баланс 0 USDT, инвентарь пуст.")
+	default:
+		showMainMenu(u, chatID)
+	}
+	saveStore()
 }
 
-func helpText() string {
-	return "" +
-		"/start — создать аккаунт / приветствие\n" +
-		"/help — помощь\n" +
-		"/balance — баланс и скорость\n" +
-		"/mine — статус добычи\n" +
-		"/inventory — ваши видеокарты\n" +
-		"/shop [страница] — магазин (по %d на страницу)\n" +
-		"/buy <ID> — купить карту\n" +
-		"/sell <ID> — продать карту за 80%% цены\n" +
-		"/reset — сброс аккаунта"
+// --- Screens (UI) ---
+
+func showMainMenu(u *User, chatID int64) {
+	text := fmt.Sprintf(
+		"👋 Добро пожаловать в *GPU Miner Simulator*\n\n"+
+			"Баланс: *%s %s*\nСкорость добычи: *%s %s/сек*\n"+
+			"Пассивная добыча действует %s после последней активности.",
+		fmtAmt(u.Balance), currency, fmtAmt(totalRate(u)), currency, durShort(miningWindow),
+	)
+	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
+		{{Text: "💰 Баланс", CallbackData: "balance"}, {Text: "⛏️ Добыча", CallbackData: "mine"}},
+		{{Text: "🛒 Магазин", CallbackData: "shop:1"}, {Text: "🎒 Инвентарь", CallbackData: "inventory"}},
+		{{Text: "ℹ️ Помощь", CallbackData: "help"}, {Text: "♻️ Сброс", CallbackData: "reset"}},
+	}}
+	sendOrReplace(u, chatID, text, kb)
+}
+
+func showHelp(u *User, chatID int64) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Команды (для совместимости — но удобнее кнопками):\n")
+	fmt.Fprintf(&b, "/start — меню\n")
+	fmt.Fprintf(&b, "/balance — баланс и скорость\n")
+	fmt.Fprintf(&b, "/mine — статус добычи\n")
+	fmt.Fprintf(&b, "/inventory — ваши видеокарты\n")
+	fmt.Fprintf(&b, "/shop [страница] — магазин (по %d на страницу)\n", shopPageSize)
+	fmt.Fprintf(&b, "/buy <ID> — купить карту\n")
+	fmt.Fprintf(&b, "/sell <ID> — продать карту за 80%% цены\n")
+	fmt.Fprintf(&b, "/reset — сброс аккаунта")
+	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
+		{{Text: "⬅️ Назад в меню", CallbackData: "menu"}},
+	}}
+	sendOrReplace(u, chatID, b.String(), kb)
+}
+
+func showBalance(u *User, chatID int64) {
+	text := fmt.Sprintf("Ваш баланс: *%s %s*\nТекущая скорость: *%s %s/сек*",
+		fmtAmt(u.Balance), currency, fmtAmt(totalRate(u)), currency)
+	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
+		{{Text: "⬅️ Назад", CallbackData: "menu"}},
+	}}
+	sendOrReplace(u, chatID, text, kb)
+}
+
+func showMine(u *User, chatID int64) {
+	left := time.Until(u.MiningWindowEnd)
+	if left < 0 {
+		left = 0
+	}
+	text := fmt.Sprintf("⛏️ Пассивная добыча активна.\nОкно истечёт через: *%s*\nСкорость: *%s %s/сек*",
+		durShort(left), fmtAmt(totalRate(u)), currency)
+	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
+		{{Text: "⬅️ Назад", CallbackData: "menu"}},
+	}}
+	sendOrReplace(u, chatID, text, kb)
+}
+
+func showShop(u *User, chatID int64, page int) {
+	if page < 1 {
+		page = 1
+	}
+	total := len(catalog)
+	pages := int(math.Ceil(float64(total) / float64(shopPageSize)))
+	if pages == 0 {
+		pages = 1
+	}
+	if page > pages {
+		page = pages
+	}
+	start := (page - 1) * shopPageSize
+	end := start + shopPageSize
+	if end > total {
+		end = total
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "🛒 *Магазин видеокарт* (стр. %d/%d)\nБаланс: %s %s\n\n", page, pages, fmtAmt(u.Balance), currency)
+	rows := [][]InlineKeyboardButton{}
+	for i := start; i < end; i++ {
+		g := catalog[i]
+		fmt.Fprintf(&b, "ID %d — %s\nЦена: %s %s | Добыча: %s %s/сек\n", g.ID, g.Name, fmtAmt(g.Price), currency, fmtAmt(g.Rate), currency)
+		rows = append(rows, []InlineKeyboardButton{{Text: "Купить: " + g.Name, CallbackData: fmt.Sprintf("buy:%d", g.ID)}})
+	}
+	nav := []InlineKeyboardButton{}
+	if page > 1 {
+		nav = append(nav, InlineKeyboardButton{Text: "◀️", CallbackData: fmt.Sprintf("shop:%d", page-1)})
+	}
+	nav = append(nav, InlineKeyboardButton{Text: "⬅️ Меню", CallbackData: "menu"})
+	if page < pages {
+		nav = append(nav, InlineKeyboardButton{Text: "▶️", CallbackData: fmt.Sprintf("shop:%d", page+1)})
+	}
+	rows = append(rows, nav)
+	kb := &InlineKeyboardMarkup{InlineKeyboard: rows}
+	sendOrReplace(u, chatID, b.String(), kb)
+}
+
+func showInventory(u *User, chatID int64) {
+	if len(u.Inventory) == 0 {
+		kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
+			{{Text: "🛒 В магазин", CallbackData: "shop:1"}, {Text: "⬅️ Меню", CallbackData: "menu"}},
+		}}
+		sendOrReplace(u, chatID, "Инвентарь пуст.", kb)
+		return
+	}
+	countBy := map[int]int{}
+	for _, id := range u.Inventory {
+		countBy[id]++
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "🎒 *Ваши видеокарты* (всего %d)\n", len(u.Inventory))
+	rows := [][]InlineKeyboardButton{}
+	var rate, totalPrice float64
+	for _, id := range uniqueInts(u.Inventory) {
+		g := catalogByID[id]
+		cnt := countBy[id]
+		rate += g.Rate * float64(cnt)
+		totalPrice += g.Price * float64(cnt)
+		fmt.Fprintf(&b, "%dx %s — %s %s/сек\n", cnt, g.Name, fmtAmt(g.Rate*float64(cnt)), currency)
+		rows = append(rows, []InlineKeyboardButton{{Text: fmt.Sprintf("Продать 1: %s", g.Name), CallbackData: fmt.Sprintf("sell:%d", g.ID)}})
+	}
+	fmt.Fprintf(&b, "\nСкорость всего: *%s %s/сек*\nОценка (80%%): ~%s %s\n", fmtAmt(rate), currency, fmtAmt(totalPrice*0.8), currency)
+	rows = append(rows, []InlineKeyboardButton{{Text: "🛒 Магазин", CallbackData: "shop:1"}, {Text: "⬅️ Меню", CallbackData: "menu"}})
+	kb := &InlineKeyboardMarkup{InlineKeyboard: rows}
+	sendOrReplace(u, chatID, b.String(), kb)
+}
+
+func showInfo(u *User, chatID int64, msg string) {
+	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
+		{{Text: "⬅️ Меню", CallbackData: "menu"}, {Text: "🛒 Магазин", CallbackData: "shop:1"}, {Text: "🎒 Инвентарь", CallbackData: "inventory"}},
+	}}
+	sendOrReplace(u, chatID, msg, kb)
 }
 
 // --- User lifecycle & accrual ---
@@ -347,36 +573,31 @@ func ensureUser(id int64, username string) *User {
 		u = &User{
 			ID:              id,
 			Username:        username,
-			Balance:         0,
+			Balance:         startBalance,
 			Inventory:       []int{},
 			CreatedAt:       time.Now().UTC(),
 			LastAccrualAt:   time.Now().UTC(),
 			MiningWindowEnd: time.Now().UTC().Add(miningWindow),
+			LastBotMsgID:    0,
 		}
 		store.Users[id] = u
 	}
 	return u
 }
 
-// accrueOnInteraction applies passive mining earnings.
-// It accrues from LastAccrualAt up to min(now, MiningWindowEnd).
-// Then it refreshes MiningWindowEnd to now + 3h and sets LastAccrualAt to now.
+// Accrue passive earnings from LastAccrualAt up to min(now, MiningWindowEnd).
+// Then refresh the 3h window starting at now.
 func accrueOnInteraction(u *User) {
 	now := time.Now().UTC()
-	// Earnings window
-	end := u.MiningWindowEnd
-	if now.After(end) {
-		end = u.MiningWindowEnd
-	} else {
-		end = now
+	accrualEnd := u.MiningWindowEnd
+	if now.Before(accrualEnd) {
+		accrualEnd = now
 	}
-	if end.After(u.LastAccrualAt) {
-		seconds := end.Sub(u.LastAccrualAt).Seconds()
-		rate := totalRate(u)
-		inc := rate * seconds
+	if accrualEnd.After(u.LastAccrualAt) {
+		seconds := accrualEnd.Sub(u.LastAccrualAt).Seconds()
+		inc := totalRate(u) * seconds
 		u.Balance += inc
 	}
-	// refresh window starting now
 	u.LastAccrualAt = now
 	u.MiningWindowEnd = now.Add(miningWindow)
 }
@@ -391,54 +612,7 @@ func totalRate(u *User) float64 {
 	return r
 }
 
-// --- Shop / Inventory ---
-
-func shopPageText(page int) string {
-	if page < 1 {
-		page = 1
-	}
-	total := len(catalog)
-	pages := int(math.Ceil(float64(total) / float64(shopPageSize)))
-	if page > pages {
-		page = pages
-	}
-	start := (page - 1) * shopPageSize
-	end := start + shopPageSize
-	if end > total {
-		end = total
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "🛒 *Магазин видеокарт* (страница %d/%d)\n", page, pages)
-	for i := start; i < end; i++ {
-		g := catalog[i]
-		fmt.Fprintf(&b, "ID %d — %s\nЦена: %s MNT | Добыча: %s MNT/сек\n", g.ID, g.Name, fmtAmt(g.Price), fmtAmt(g.Rate))
-	}
-	fmt.Fprintf(&b, "\nИспользуйте: /buy <ID>\nСледующая страница: /shop %d", minInt(page+1, pages))
-	return b.String()
-}
-
-func inventoryText(u *User) string {
-	if len(u.Inventory) == 0 {
-		return "Инвентарь пуст. Зайдите в /shop"
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "🎒 *Ваши видеокарты* (всего %d)\n", len(u.Inventory))
-	var totalPrice, rate float64
-	countBy := map[int]int{}
-	for _, id := range u.Inventory {
-		countBy[id]++
-	}
-	for _, id := range uniqueInts(u.Inventory) {
-		g := catalogByID[id]
-		cnt := countBy[id]
-		fmt.Fprintf(&b, "%dx %s — суммарная добыча %s MNT/сек\n", cnt, g.Name, fmtAmt(g.Rate*float64(cnt)))
-		rate += g.Rate * float64(cnt)
-		totalPrice += g.Price * float64(cnt)
-	}
-	fmt.Fprintf(&b, "\nИтого скорость: *%s MNT/сек*\nТеор. стоимость: ~%s MNT\n", fmtAmt(rate), fmtAmt(totalPrice*0.8))
-	fmt.Fprintf(&b, "Продажа: /sell <ID> (80%% цены за штуку)")
-	return b.String()
-}
+// --- Shop / Inventory logic ---
 
 func buyGPU(u *User, id int) string {
 	g, ok := catalogByID[id]
@@ -446,11 +620,11 @@ func buyGPU(u *User, id int) string {
 		return "Такого товара нет"
 	}
 	if u.Balance < g.Price {
-		return fmt.Sprintf("Недостаточно средств. Нужно %s MNT", fmtAmt(g.Price))
+		return fmt.Sprintf("Недостаточно средств. Нужно %s %s", fmtAmt(g.Price), currency)
 	}
 	u.Balance -= g.Price
 	u.Inventory = append(u.Inventory, g.ID)
-	return fmt.Sprintf("Куплено: *%s*. Остаток: %s MNT. Текущая скорость: %s MNT/сек", g.Name, fmtAmt(u.Balance), fmtAmt(totalRate(u)))
+	return fmt.Sprintf("Куплено: *%s*. Остаток: %s %s. Скорость: %s %s/сек", g.Name, fmtAmt(u.Balance), currency, fmtAmt(totalRate(u)), currency)
 }
 
 func sellGPU(u *User, id int) string {
@@ -469,7 +643,7 @@ func sellGPU(u *User, id int) string {
 	u.Inventory = append(u.Inventory[:idx], u.Inventory[idx+1:]...)
 	refund := g.Price * 0.8
 	u.Balance += refund
-	return fmt.Sprintf("Продано: *%s* за %s MNT. Баланс: %s MNT. Скорость: %s MNT/сек", g.Name, fmtAmt(refund), fmtAmt(u.Balance), fmtAmt(totalRate(u)))
+	return fmt.Sprintf("Продано: *%s* за %s %s. Баланс: %s %s. Скорость: %s %s/сек", g.Name, fmtAmt(refund), currency, fmtAmt(u.Balance), currency, fmtAmt(totalRate(u)), currency)
 }
 
 func resetUser(u *User) {
@@ -482,8 +656,6 @@ func resetUser(u *User) {
 // --- Catalog (60 GPUs) ---
 
 func buildCatalog() []GPU {
-	// Rates grow roughly exponentially; prices scale ~rate * factor
-	// Base rate ~1e-6 MNT/s (very weak), top ~2e-2 MNT/s (very strong)
 	var list []GPU
 	seed := []struct {
 		name  string
@@ -559,7 +731,6 @@ func buildCatalog() []GPU {
 // --- Utils ---
 
 func fmtAmt(v float64) string {
-	// Trim trailing zeros
 	s := strconv.FormatFloat(v, 'f', ratesDecimals, 64)
 	s = strings.TrimRight(s, "0")
 	if strings.HasSuffix(s, ".") {
@@ -601,13 +772,6 @@ func uniqueInts(a []int) []int {
 		}
 	}
 	return out
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // --- END ---
