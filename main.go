@@ -1,25 +1,3 @@
-// Telegram Miner Simulator Bot
-// Requirements:
-// - Pure Go stdlib only (no third‑party libs), uses Telegram Bot API via HTTPS
-// - Simulates GPU "mining" with purchasable video cards (50+ models), each with its own
-//   price and passive mining rate
-// - "Autonomous" mining continues up to 3 hours after the user's last interaction
-//   (mining window). When the user returns, accrues earnings up to the window end,
-//   then starts a fresh 3-hour window.
-// - Simple JSON file persistence
-// - Basic commands: /start, /help, /balance, /mine, /inventory, /shop [page], /buy <id>, /sell <id>, /reset
-//
-// Usage:
-//   export TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
-//   go run main.go
-//
-// Notes:
-// - Currency unit here is MNT ("miner tokens")
-// - Mining rate units are MNT per second
-// - Prices are in MNT
-// - This is a minimal but production-ready foundation; consider running behind a process
-//   supervisor and backing up the data folder.
-
 package main
 
 import (
@@ -27,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	_ "io"
 	"log"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
+	_ "path/filepath"
 	"strconv"
 	"strings"
 	"sync"
