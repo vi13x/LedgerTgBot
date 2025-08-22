@@ -254,8 +254,6 @@ func handleMessage(m *tgbotapi.Message) {
 			} else {
 				sendMessage(m.Chat.ID, "Используйте: /btc_sell [количество]")
 			}
-		case "/join_chat":
-			sendJoinChatInfo(u, m.Chat.ID)
 		default:
 			sendMainMenu(u, m.Chat.ID)
 		}
@@ -342,9 +340,6 @@ func sendMainMenu(u *User, chatID int64) {
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("💸 Вывести BTC в USD", "convert_btc_usd"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("👥 Стать представителем", "join_chat"),
 		),
 	)
 
@@ -708,16 +703,6 @@ func sellBTC(u *User, amount float64, chatID int64) {
 	u.BalanceUSD += income
 
 	text := fmt.Sprintf("✅ *Продажа BTC совершена*\n\nПродано: %.5f BTC\nПолучено: %.0f $\n\n%s", amount, income, currentTime)
-	sendMessage(chatID, text)
-}
-
-func sendJoinChatInfo(u *User, chatID int64) {
-	currentTime := time.Now().Format("15:04")
-	text := "👥 *Стать представителем чата*\n\n"
-	text += "Чтобы стать представителем этого чата и получать комиссию с покупок участников, свяжитесь с администратором.\n\n"
-	text += "Для получения дополнительной информации отправьте сообщение @admin"
-	text += fmt.Sprintf("\n\n%s", currentTime)
-
 	sendMessage(chatID, text)
 }
 
