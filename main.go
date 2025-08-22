@@ -316,8 +316,8 @@ func sendMainMenu(u *User, chatID int64) {
 	currentTime := time.Now().Format("15:04")
 	text := fmt.Sprintf("🖥 *Симулятор майнера* 🖥\n\n")
 	text += fmt.Sprintf("• Вместимость фермы: %d/95\n", len(u.Inventory))
-	text += fmt.Sprintf("• Заработок фермы: %.5f BTC / 10 мин\n", totalMiningRate(u))
-	text += fmt.Sprintf("• Доход бизнесов: %.5f BTC / 10 мин\n", totalBusinessIncome(u))
+	text += fmt.Sprintf("• Заработок фермы: %.7f BTC / 10 мин\n", totalMiningRate(u))
+	text += fmt.Sprintf("• Доход бизнесов: %.7f BTC / 10 мин\n", totalBusinessIncome(u))
 	text += fmt.Sprintf("• Баланс: %.5f BTC\n", u.BalanceBTC)
 	text += fmt.Sprintf("• Баланс: %.0f $\n\n", u.BalanceUSD)
 	text += fmt.Sprintf("Курс BTC: %.0f $ / 1 BTC\n\n", btcRate)
@@ -350,8 +350,8 @@ func sendStats(u *User, chatID int64) {
 	text += fmt.Sprintf("• Игрок: @%s\n", u.Username)
 	text += fmt.Sprintf("• Видеокарты: %d/95\n", len(u.Inventory))
 	text += fmt.Sprintf("• Бизнесы: %d\n", len(u.Businesses))
-	text += fmt.Sprintf("• Общий доход: %.5f BTC / 10 мин\n", totalMiningRate(u)+totalBusinessIncome(u))
-	text += fmt.Sprintf("• Баланс BTC: %.5f\n", u.BalanceBTC)
+	text += fmt.Sprintf("• Общий доход: %.7f BTC / 10 мин\n", totalMiningRate(u)+totalBusinessIncome(u))
+	text += fmt.Sprintf("• Баланс BTC: %.7f\n", u.BalanceBTC)
 	text += fmt.Sprintf("• Баланс USD: %.0f\n", u.BalanceUSD)
 	text += fmt.Sprintf("• Играет с: %s\n", u.CreatedAt.Format("02.01.2006"))
 	text += fmt.Sprintf("\n%s", currentTime)
@@ -395,7 +395,7 @@ func sendBusinesses(u *User, chatID int64) {
 	} else {
 		for i, id := range u.Businesses {
 			if biz, ok := bizByID[id]; ok {
-				text += fmt.Sprintf("%d. %s - %.5f BTC/10мин\n", i+1, biz.Name, biz.Income)
+				text += fmt.Sprintf("%d. %s - %.7f BTC/10мин\n", i+1, biz.Name, biz.Income)
 			}
 		}
 	}
@@ -417,7 +417,7 @@ func sendFarm(u *User, chatID int64) {
 	currentTime := time.Now().Format("15:04")
 	text := fmt.Sprintf("🖥 *Ваша ферма*\n\n")
 	text += fmt.Sprintf("• Вместимость: %d/95\n", len(u.Inventory))
-	text += fmt.Sprintf("• Доход фермы: %.5f BTC/10мин\n", totalMiningRate(u))
+	text += fmt.Sprintf("• Доход фермы: %.7f BTC/10мин\n", totalMiningRate(u))
 
 	if len(u.Inventory) == 0 {
 		text += "\nУ вас пока нет видеокарт. Приобретите их в магазине!"
@@ -425,7 +425,7 @@ func sendFarm(u *User, chatID int64) {
 		text += "\nУстановленные видеокарты:\n"
 		for i, id := range u.Inventory {
 			if gpu, ok := gpuByID[id]; ok {
-				text += fmt.Sprintf("%d. %s - %.5f BTC/10мин\n", i+1, gpu.Name, gpu.Rate)
+				text += fmt.Sprintf("%d. %s - %.7f BTC/10мин\n", i+1, gpu.Name, gpu.Rate)
 			}
 		}
 	}
