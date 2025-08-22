@@ -18,7 +18,7 @@ const (
 	dataDir       = "data"
 	usersFile     = "data/users.json"
 	ratesDecimals = 8
-	btcRate       = 112937.0 // Курс BTC в USD
+	btcRate       = 112937.0
 
 	shopPageSize = 5
 	miningWindow = 10 * time.Minute
@@ -30,15 +30,15 @@ const (
 type GPU struct {
 	ID    int     `json:"id"`
 	Name  string  `json:"name"`
-	Rate  float64 `json:"rate"`  // BTC за 10 минут
-	Price float64 `json:"price"` // Цена в USD
+	Rate  float64 `json:"rate"`
+	Price float64 `json:"price"`
 }
 
 type Business struct {
 	ID     int     `json:"id"`
 	Name   string  `json:"name"`
-	Income float64 `json:"income"` // BTC за 10 минут
-	Price  float64 `json:"price"`  // Цена в USD
+	Income float64 `json:"income"`
+	Price  float64 `json:"price"`
 }
 
 type User struct {
@@ -53,7 +53,7 @@ type User struct {
 	MiningWindowEnd   time.Time `json:"mining_window_end"`
 	LastBonusTime     time.Time `json:"last_bonus_time"`
 	FarmCapacity      int       `json:"farm_capacity"`
-	LastShopMessageID int       `json:"last_shop_message_id"` // ID последнего сообщения магазина
+	LastShopMessageID int       `json:"last_shop_message_id"`
 }
 
 type Store struct {
@@ -191,11 +191,9 @@ func accrueEarnings(u *User) {
 		elapsed := now.Sub(u.LastAccrualAt)
 		minutes := elapsed.Minutes()
 
-		// Начисляем доход от майнинга
 		miningIncome := totalMiningRate(u) * (minutes / 10.0)
 		u.BalanceBTC += miningIncome
 
-		// Начисляем доход от бизнесов
 		businessIncome := totalBusinessIncome(u) * (minutes / 10.0)
 		u.BalanceBTC += businessIncome
 	}
@@ -271,7 +269,7 @@ func handleCallback(cb *tgbotapi.CallbackQuery) {
 
 	switch {
 	case data == "main_menu":
-		u.LastShopMessageID = 0 // Сбрасываем ID сообщения магазина
+		u.LastShopMessageID = 0
 		sendMainMenu(u, chatID)
 	case data == "stats":
 		u.LastShopMessageID = 0
@@ -491,7 +489,6 @@ func sendGPUShop(u *User, chatID int64, page int) {
 		))
 	}
 
-	// Добавляем навигацию
 	navRow := make([]tgbotapi.InlineKeyboardButton, 0)
 	if page > 1 {
 		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️", fmt.Sprintf("gpu_shop_page:%d", page-1)))
@@ -509,17 +506,16 @@ func sendGPUShop(u *User, chatID int64, page int) {
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(kbRows...)
 
-	// Если у нас есть ID предыдущего сообщения магазина, редактируем его
-	if u.LastShopMessageID != 0 {
-		editMessage(chatID, u.LastShopMessageID, text, kb)
-	} else {
-		// Иначе отправляем новое сообщение и сохраняем его ID
-		msg := tgbotapi.NewMessage(chatID, text)
-		msg.ParseMode = "Markdown"
-		msg.ReplyMarkup = kb
-		sentMsg, _ := bot.Send(msg)
-		u.LastShopMessageID = sentMsg.MessageID
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "Markdown"
+	msg.ReplyMarkup = kb
+	sentMsg, err := bot.Send(msg)
+	if err != nil {
+		log.Printf("Ошибка отправки магазина GPU: %v", err)
+		return
 	}
+
+	u.LastShopMessageID = sentMsg.MessageID
 }
 
 func sendBusinessShop(u *User, chatID int64, page int) {
@@ -551,7 +547,6 @@ func sendBusinessShop(u *User, chatID int64, page int) {
 		))
 	}
 
-	// Добавляем навигацию
 	navRow := make([]tgbotapi.InlineKeyboardButton, 0)
 	if page > 1 {
 		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️", fmt.Sprintf("biz_shop_page:%d", page-1)))
@@ -569,11 +564,10 @@ func sendBusinessShop(u *User, chatID int64, page int) {
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(kbRows...)
 
-	// Если у нас есть ID предыдущего сообщения магазина, редактируем его
 	if u.LastShopMessageID != 0 {
 		editMessage(chatID, u.LastShopMessageID, text, kb)
 	} else {
-		// Иначе отправляем новое сообщение и сохраняем его ID
+
 		msg := tgbotapi.NewMessage(chatID, text)
 		msg.ParseMode = "Markdown"
 		msg.ReplyMarkup = kb
@@ -628,6 +622,10 @@ func buyGPU(u *User, id int, chatID int64) {
 		return
 	}
 
+	if u.FarmCapacity == 0 {
+		u.FarmCapacity = 95
+	}
+
 	if len(u.Inventory) >= u.FarmCapacity {
 		sendMessage(chatID, fmt.Sprintf("Достигнут лимит фермы. Нельзя купить больше видеокарт\n\n%s", currentTime))
 		return
@@ -640,7 +638,6 @@ func buyGPU(u *User, id int, chatID int64) {
 		gpu.Name, gpu.Price, gpu.Rate, currentTime)
 	sendMessage(chatID, text)
 
-	// После покупки обновляем магазин
 	sendGPUShop(u, chatID, 1)
 }
 
@@ -657,7 +654,6 @@ func buyBusiness(u *User, id int, chatID int64) {
 		return
 	}
 
-	// Проверяем, нет ли уже такого бизнеса
 	for _, bizID := range u.Businesses {
 		if bizID == id {
 			sendMessage(chatID, fmt.Sprintf("У вас уже есть этот бизнес\n\n%s", currentTime))
@@ -672,7 +668,6 @@ func buyBusiness(u *User, id int, chatID int64) {
 		biz.Name, biz.Price, biz.Income, currentTime)
 	sendMessage(chatID, text)
 
-	// После покупки обновляем магазин
 	sendBusinessShop(u, chatID, 1)
 }
 
