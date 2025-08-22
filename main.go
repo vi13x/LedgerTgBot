@@ -42,17 +42,18 @@ type Business struct {
 }
 
 type User struct {
-	ID              int64     `json:"id"`
-	Username        string    `json:"username"`
-	BalanceBTC      float64   `json:"balance_btc"`
-	BalanceUSD      float64   `json:"balance_usd"`
-	Inventory       []int     `json:"inventory"`
-	Businesses      []int     `json:"businesses"`
-	CreatedAt       time.Time `json:"created_at"`
-	LastAccrualAt   time.Time `json:"last_accrual_at"`
-	MiningWindowEnd time.Time `json:"mining_window_end"`
-	LastBonusTime   time.Time `json:"last_bonus_time"`
-	FarmCapacity    int       `json:"farm_capacity"`
+	ID                int64     `json:"id"`
+	Username          string    `json:"username"`
+	BalanceBTC        float64   `json:"balance_btc"`
+	BalanceUSD        float64   `json:"balance_usd"`
+	Inventory         []int     `json:"inventory"`
+	Businesses        []int     `json:"businesses"`
+	CreatedAt         time.Time `json:"created_at"`
+	LastAccrualAt     time.Time `json:"last_accrual_at"`
+	MiningWindowEnd   time.Time `json:"mining_window_end"`
+	LastBonusTime     time.Time `json:"last_bonus_time"`
+	FarmCapacity      int       `json:"farm_capacity"`
+	LastShopMessageID int       `json:"last_shop_message_id"` // ID последнего сообщения магазина
 }
 
 type Store struct {
@@ -167,16 +168,17 @@ func ensureUser(id int64, username string) *User {
 	u, ok := store.Users[id]
 	if !ok {
 		u = &User{
-			ID:            id,
-			Username:      username,
-			BalanceBTC:    startBalanceBTC,
-			BalanceUSD:    startBalanceUSD,
-			Inventory:     []int{},
-			Businesses:    []int{},
-			CreatedAt:     time.Now(),
-			LastAccrualAt: time.Now(),
-			LastBonusTime: time.Now().Add(-25 * time.Hour),
-			FarmCapacity:  95,
+			ID:                id,
+			Username:          username,
+			BalanceBTC:        startBalanceBTC,
+			BalanceUSD:        startBalanceUSD,
+			Inventory:         []int{},
+			Businesses:        []int{},
+			CreatedAt:         time.Now(),
+			LastAccrualAt:     time.Now(),
+			LastBonusTime:     time.Now().Add(-25 * time.Hour),
+			FarmCapacity:      95,
+			LastShopMessageID: 0,
 		}
 		store.Users[id] = u
 	}
@@ -271,24 +273,32 @@ func handleCallback(cb *tgbotapi.CallbackQuery) {
 
 	switch {
 	case data == "main_menu":
+		u.LastShopMessageID = 0 // Сбрасываем ID сообщения магазина
 		sendMainMenu(u, chatID)
 	case data == "stats":
+		u.LastShopMessageID = 0
 		sendStats(u, chatID)
 	case data == "ref":
+		u.LastShopMessageID = 0
 		sendRefInfo(u, chatID)
 	case data == "business":
+		u.LastShopMessageID = 0
 		sendBusinesses(u, chatID)
 	case data == "farm":
+		u.LastShopMessageID = 0
 		sendFarm(u, chatID)
 	case data == "shop":
+		u.LastShopMessageID = 0
 		sendShopMenu(u, chatID)
 	case data == "gpu_shop":
 		sendGPUShop(u, chatID, 1)
 	case data == "business_shop":
 		sendBusinessShop(u, chatID, 1)
 	case data == "daily_bonus":
+		u.LastShopMessageID = 0
 		claimDailyBonus(u, chatID)
 	case data == "convert_btc_usd":
+		u.LastShopMessageID = 0
 		convertAllBTCtoUSD(u, chatID)
 	case strings.HasPrefix(data, "buy_gpu:"):
 		id, _ := strconv.Atoi(strings.Split(data, ":")[1])
@@ -307,13 +317,15 @@ func handleCallback(cb *tgbotapi.CallbackQuery) {
 }
 
 func sendMainMenu(u *User, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	text := fmt.Sprintf("🖥 *Симулятор майнера* 🖥\n\n")
 	text += fmt.Sprintf("• Вместимость фермы: %d/95\n", len(u.Inventory))
 	text += fmt.Sprintf("• Заработок фермы: %.5f BTC / 10 мин\n", totalMiningRate(u))
 	text += fmt.Sprintf("• Доход бизнесов: %.5f BTC / 10 мин\n", totalBusinessIncome(u))
 	text += fmt.Sprintf("• Баланс: %.5f BTC\n", u.BalanceBTC)
 	text += fmt.Sprintf("• Баланс: %.0f $\n\n", u.BalanceUSD)
-	text += fmt.Sprintf("Курс BTC: %.0f $ / 1 BTC", btcRate)
+	text += fmt.Sprintf("Курс BTC: %.0f $ / 1 BTC\n\n", btcRate)
+	text += fmt.Sprintf("%s", currentTime)
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -340,6 +352,7 @@ func sendMainMenu(u *User, chatID int64) {
 }
 
 func sendStats(u *User, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	text := fmt.Sprintf("📊 *Личная статистика*\n\n")
 	text += fmt.Sprintf("• Игрок: @%s\n", u.Username)
 	text += fmt.Sprintf("• Видеокарты: %d/95\n", len(u.Inventory))
@@ -348,6 +361,7 @@ func sendStats(u *User, chatID int64) {
 	text += fmt.Sprintf("• Баланс BTC: %.5f\n", u.BalanceBTC)
 	text += fmt.Sprintf("• Баланс USD: %.0f\n", u.BalanceUSD)
 	text += fmt.Sprintf("• Играет с: %s\n", u.CreatedAt.Format("02.01.2006"))
+	text += fmt.Sprintf("\n%s", currentTime)
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -359,6 +373,7 @@ func sendStats(u *User, chatID int64) {
 }
 
 func sendRefInfo(u *User, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	refLink := fmt.Sprintf("https://t.me/%s?start=ref%d", bot.Self.UserName, u.ID)
 
 	text := fmt.Sprintf("🎁 *Реферальная программа*\n\n")
@@ -367,6 +382,7 @@ func sendRefInfo(u *User, chatID int64) {
 	text += fmt.Sprintf("За каждого приглашенного друга вы получите:\n")
 	text += fmt.Sprintf("• 1000 $\n")
 	text += fmt.Sprintf("• 0.001 BTC\n")
+	text += fmt.Sprintf("\n%s", currentTime)
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -378,6 +394,7 @@ func sendRefInfo(u *User, chatID int64) {
 }
 
 func sendBusinesses(u *User, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	text := fmt.Sprintf("🏢 *Ваши бизнесы*\n\n")
 
 	if len(u.Businesses) == 0 {
@@ -391,6 +408,7 @@ func sendBusinesses(u *User, chatID int64) {
 	}
 
 	text += fmt.Sprintf("\nОбщий доход от бизнесов: %.5f BTC/10мин", totalBusinessIncome(u))
+	text += fmt.Sprintf("\n\n%s", currentTime)
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -403,6 +421,7 @@ func sendBusinesses(u *User, chatID int64) {
 }
 
 func sendFarm(u *User, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	text := fmt.Sprintf("🖥 *Ваша ферма*\n\n")
 	text += fmt.Sprintf("• Вместимость: %d/95\n", len(u.Inventory))
 	text += fmt.Sprintf("• Доход фермы: %.5f BTC/10мин\n", totalMiningRate(u))
@@ -418,6 +437,8 @@ func sendFarm(u *User, chatID int64) {
 		}
 	}
 
+	text += fmt.Sprintf("\n%s", currentTime)
+
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🛒 Магазин видеокарт", "gpu_shop"),
@@ -429,7 +450,9 @@ func sendFarm(u *User, chatID int64) {
 }
 
 func sendShopMenu(u *User, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	text := "🛒 *Магазин*\n\nВыбери, в какой отдел хочешь пойти:"
+	text += fmt.Sprintf("\n\n%s", currentTime)
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -445,6 +468,7 @@ func sendShopMenu(u *User, chatID int64) {
 }
 
 func sendGPUShop(u *User, chatID int64, page int) {
+	currentTime := time.Now().Format("15:04")
 	start := (page - 1) * shopPageSize
 	end := start + shopPageSize
 	if end > len(gpuCatalog) {
@@ -457,7 +481,9 @@ func sendGPUShop(u *User, chatID int64, page int) {
 		text += fmt.Sprintf("Доход: %.5f BTC/10мин\n\n", gpu.Rate)
 	}
 
-	text += fmt.Sprintf("Страница %d/%d", page, (len(gpuCatalog)+shopPageSize-1)/shopPageSize)
+	totalPages := (len(gpuCatalog) + shopPageSize - 1) / shopPageSize
+	text += fmt.Sprintf("Страница %d/%d\n\n", page, totalPages)
+	text += fmt.Sprintf("%s", currentTime)
 
 	kbRows := make([][]tgbotapi.InlineKeyboardButton, 0)
 
@@ -473,24 +499,36 @@ func sendGPUShop(u *User, chatID int64, page int) {
 	// Добавляем навигацию
 	navRow := make([]tgbotapi.InlineKeyboardButton, 0)
 	if page > 1 {
-		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("gpu_shop_page:%d", page-1)))
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️", fmt.Sprintf("gpu_shop_page:%d", page-1)))
 	}
 	if end < len(gpuCatalog) {
-		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("gpu_shop_page:%d", page+1)))
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("➡️", fmt.Sprintf("gpu_shop_page:%d", page+1)))
 	}
 	if len(navRow) > 0 {
 		kbRows = append(kbRows, navRow)
 	}
 
 	kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("⬅️ В главное меню", "main_menu"),
+		tgbotapi.NewInlineKeyboardButtonData("📌 В главное меню", "main_menu"),
 	))
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(kbRows...)
-	sendMessageWithKeyboard(chatID, text, kb)
+
+	// Если у нас есть ID предыдущего сообщения магазина, редактируем его
+	if u.LastShopMessageID != 0 {
+		editMessage(chatID, u.LastShopMessageID, text, kb)
+	} else {
+		// Иначе отправляем новое сообщение и сохраняем его ID
+		msg := tgbotapi.NewMessage(chatID, text)
+		msg.ParseMode = "Markdown"
+		msg.ReplyMarkup = kb
+		sentMsg, _ := bot.Send(msg)
+		u.LastShopMessageID = sentMsg.MessageID
+	}
 }
 
 func sendBusinessShop(u *User, chatID int64, page int) {
+	currentTime := time.Now().Format("15:04")
 	start := (page - 1) * shopPageSize
 	end := start + shopPageSize
 	if end > len(bizCatalog) {
@@ -503,7 +541,9 @@ func sendBusinessShop(u *User, chatID int64, page int) {
 		text += fmt.Sprintf("Доход: %.5f BTC/10мин\n\n", biz.Income)
 	}
 
-	text += fmt.Sprintf("Страница %d/%d", page, (len(bizCatalog)+shopPageSize-1)/shopPageSize)
+	totalPages := (len(bizCatalog) + shopPageSize - 1) / shopPageSize
+	text += fmt.Sprintf("Страница %d/%d\n\n", page, totalPages)
+	text += fmt.Sprintf("%s", currentTime)
 
 	kbRows := make([][]tgbotapi.InlineKeyboardButton, 0)
 
@@ -519,28 +559,40 @@ func sendBusinessShop(u *User, chatID int64, page int) {
 	// Добавляем навигацию
 	navRow := make([]tgbotapi.InlineKeyboardButton, 0)
 	if page > 1 {
-		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("biz_shop_page:%d", page-1)))
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️", fmt.Sprintf("biz_shop_page:%d", page-1)))
 	}
 	if end < len(bizCatalog) {
-		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("biz_shop_page:%d", page+1)))
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("➡️", fmt.Sprintf("biz_shop_page:%d", page+1)))
 	}
 	if len(navRow) > 0 {
 		kbRows = append(kbRows, navRow)
 	}
 
 	kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("⬅️ В главное меню", "main_menu"),
+		tgbotapi.NewInlineKeyboardButtonData("📌 В главное меню", "main_menu"),
 	))
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(kbRows...)
-	sendMessageWithKeyboard(chatID, text, kb)
+
+	// Если у нас есть ID предыдущего сообщения магазина, редактируем его
+	if u.LastShopMessageID != 0 {
+		editMessage(chatID, u.LastShopMessageID, text, kb)
+	} else {
+		// Иначе отправляем новое сообщение и сохраняем его ID
+		msg := tgbotapi.NewMessage(chatID, text)
+		msg.ParseMode = "Markdown"
+		msg.ReplyMarkup = kb
+		sentMsg, _ := bot.Send(msg)
+		u.LastShopMessageID = sentMsg.MessageID
+	}
 }
 
 func claimDailyBonus(u *User, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	now := time.Now()
 	if now.Sub(u.LastBonusTime) < 24*time.Hour {
 		timeLeft := 24*time.Hour - now.Sub(u.LastBonusTime)
-		text := fmt.Sprintf("🎁 Вы уже получали ежедневный бонус сегодня\n\nСледующий бонус через: %.0f часов", timeLeft.Hours())
+		text := fmt.Sprintf("🎁 Вы уже получали ежедневный бонус сегодня\n\nСледующий бонус через: %.0f часов\n\n%s", timeLeft.Hours(), currentTime)
 		sendMessage(chatID, text)
 		return
 	}
@@ -549,13 +601,14 @@ func claimDailyBonus(u *User, chatID int64) {
 	u.BalanceBTC += bonusBTC
 	u.LastBonusTime = now
 
-	text := fmt.Sprintf("🎁 *Ежедневный бонус получен!*\n\n+%.5f BTC", bonusBTC)
+	text := fmt.Sprintf("🎁 *Ежедневный бонус получен!*\n\n+%.5f BTC\n\n%s", bonusBTC, currentTime)
 	sendMessage(chatID, text)
 }
 
 func convertAllBTCtoUSD(u *User, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	if u.BalanceBTC <= 0 {
-		sendMessage(chatID, "У вас нет BTC для конвертации")
+		sendMessage(chatID, fmt.Sprintf("У вас нет BTC для конвертации\n\n%s", currentTime))
 		return
 	}
 
@@ -563,51 +616,56 @@ func convertAllBTCtoUSD(u *User, chatID int64) {
 	u.BalanceUSD += usdAmount
 	u.BalanceBTC = 0
 
-	text := fmt.Sprintf("💸 *Конвертация завершена*\n\nВы конвертировали все свои BTC в USD\nПолучено: %.0f $", usdAmount)
+	text := fmt.Sprintf("💸 *Конвертация завершена*\n\nВы конвертировали все свои BTC в USD\nПолучено: %.0f $\n\n%s", usdAmount, currentTime)
 	sendMessage(chatID, text)
 }
 
 func buyGPU(u *User, id int, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	gpu, exists := gpuByID[id]
 	if !exists {
-		sendMessage(chatID, "Эта видеокарта не найдена")
+		sendMessage(chatID, fmt.Sprintf("Эта видеокарта не найдена\n\n%s", currentTime))
 		return
 	}
 
 	if u.BalanceUSD < gpu.Price {
-		sendMessage(chatID, "Недостаточно средств для покупки")
+		sendMessage(chatID, fmt.Sprintf("Недостаточно средств для покупки\n\n%s", currentTime))
 		return
 	}
 
 	if len(u.Inventory) >= u.FarmCapacity {
-		sendMessage(chatID, "Достигнут лимит фермы. Нельзя купить больше видеокарт")
+		sendMessage(chatID, fmt.Sprintf("Достигнут лимит фермы. Нельзя купить больше видеокарт\n\n%s", currentTime))
 		return
 	}
 
 	u.BalanceUSD -= gpu.Price
 	u.Inventory = append(u.Inventory, id)
 
-	text := fmt.Sprintf("✅ *Покупка совершена*\n\nВы приобрели: %s\nПотрачено: %.0f $\nДоход: %.5f BTC/10мин",
-		gpu.Name, gpu.Price, gpu.Rate)
+	text := fmt.Sprintf("✅ *Покупка совершена*\n\nВы приобрели: %s\nПотрачено: %.0f $\nДоход: %.5f BTC/10мин\n\n%s",
+		gpu.Name, gpu.Price, gpu.Rate, currentTime)
 	sendMessage(chatID, text)
+
+	// После покупки обновляем магазин
+	sendGPUShop(u, chatID, 1)
 }
 
 func buyBusiness(u *User, id int, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	biz, exists := bizByID[id]
 	if !exists {
-		sendMessage(chatID, "Этот бизнес не найден")
+		sendMessage(chatID, fmt.Sprintf("Этот бизнес не найден\n\n%s", currentTime))
 		return
 	}
 
 	if u.BalanceUSD < biz.Price {
-		sendMessage(chatID, "Недостаточно средств для покупки")
+		sendMessage(chatID, fmt.Sprintf("Недостаточно средств для покупки\n\n%s", currentTime))
 		return
 	}
 
 	// Проверяем, нет ли уже такого бизнеса
 	for _, bizID := range u.Businesses {
 		if bizID == id {
-			sendMessage(chatID, "У вас уже есть этот бизнес")
+			sendMessage(chatID, fmt.Sprintf("У вас уже есть этот бизнес\n\n%s", currentTime))
 			return
 		}
 	}
@@ -615,28 +673,33 @@ func buyBusiness(u *User, id int, chatID int64) {
 	u.BalanceUSD -= biz.Price
 	u.Businesses = append(u.Businesses, id)
 
-	text := fmt.Sprintf("✅ *Покупка совершена*\n\nВы приобрели: %s\nПотрачено: %.0f $\nДоход: %.5f BTC/10мин",
-		biz.Name, biz.Price, biz.Income)
+	text := fmt.Sprintf("✅ *Покупка совершена*\n\nВы приобрели: %s\nПотрачено: %.0f $\nДоход: %.5f BTC/10мин\n\n%s",
+		biz.Name, biz.Price, biz.Income, currentTime)
 	sendMessage(chatID, text)
+
+	// После покупки обновляем магазин
+	sendBusinessShop(u, chatID, 1)
 }
 
 func buyBTC(u *User, amount float64, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	cost := amount * btcRate
 	if u.BalanceUSD < cost {
-		sendMessage(chatID, "Недостаточно USD для покупки BTC")
+		sendMessage(chatID, fmt.Sprintf("Недостаточно USD для покупки BTC\n\n%s", currentTime))
 		return
 	}
 
 	u.BalanceUSD -= cost
 	u.BalanceBTC += amount
 
-	text := fmt.Sprintf("✅ *Покупка BTC совершена*\n\nКуплено: %.5f BTC\nПотрачено: %.0f $", amount, cost)
+	text := fmt.Sprintf("✅ *Покупка BTC совершена*\n\nКуплено: %.5f BTC\nПотрачено: %.0f $\n\n%s", amount, cost, currentTime)
 	sendMessage(chatID, text)
 }
 
 func sellBTC(u *User, amount float64, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	if u.BalanceBTC < amount {
-		sendMessage(chatID, "Недостаточно BTC для продажи")
+		sendMessage(chatID, fmt.Sprintf("Недостаточно BTC для продажи\n\n%s", currentTime))
 		return
 	}
 
@@ -644,14 +707,16 @@ func sellBTC(u *User, amount float64, chatID int64) {
 	u.BalanceBTC -= amount
 	u.BalanceUSD += income
 
-	text := fmt.Sprintf("✅ *Продажа BTC совершена*\n\nПродано: %.5f BTC\nПолучено: %.0f $", amount, income)
+	text := fmt.Sprintf("✅ *Продажа BTC совершена*\n\nПродано: %.5f BTC\nПолучено: %.0f $\n\n%s", amount, income, currentTime)
 	sendMessage(chatID, text)
 }
 
 func sendJoinChatInfo(u *User, chatID int64) {
+	currentTime := time.Now().Format("15:04")
 	text := "👥 *Стать представителем чата*\n\n"
 	text += "Чтобы стать представителем этого чата и получать комиссию с покупок участников, свяжитесь с администратором.\n\n"
 	text += "Для получения дополнительной информации отправьте сообщение @admin"
+	text += fmt.Sprintf("\n\n%s", currentTime)
 
 	sendMessage(chatID, text)
 }
@@ -666,6 +731,12 @@ func sendMessageWithKeyboard(chatID int64, text string, kb tgbotapi.InlineKeyboa
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
 	msg.ReplyMarkup = kb
+	bot.Send(msg)
+}
+
+func editMessage(chatID int64, messageID int, text string, kb tgbotapi.InlineKeyboardMarkup) {
+	msg := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, text, kb)
+	msg.ParseMode = "Markdown"
 	bot.Send(msg)
 }
 
