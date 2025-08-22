@@ -18,30 +18,41 @@ const (
 	dataDir       = "data"
 	usersFile     = "data/users.json"
 	ratesDecimals = 8
+	btcRate       = 112937.0 // Курс BTC в USD
 
 	shopPageSize = 5
-	miningWindow = 3 * time.Hour
+	miningWindow = 10 * time.Minute
 
-	startBalance = 100.0
-	currency     = "USDT"
+	startBalanceBTC = 0.0
+	startBalanceUSD = 100.0
 )
 
 type GPU struct {
 	ID    int     `json:"id"`
 	Name  string  `json:"name"`
-	Rate  float64 `json:"rate"`
-	Price float64 `json:"price"`
+	Rate  float64 `json:"rate"`  // BTC за 10 минут
+	Price float64 `json:"price"` // Цена в USD
+}
+
+type Business struct {
+	ID     int     `json:"id"`
+	Name   string  `json:"name"`
+	Income float64 `json:"income"` // BTC за 10 минут
+	Price  float64 `json:"price"`  // Цена в USD
 }
 
 type User struct {
 	ID              int64     `json:"id"`
 	Username        string    `json:"username"`
-	Balance         float64   `json:"balance"`
+	BalanceBTC      float64   `json:"balance_btc"`
+	BalanceUSD      float64   `json:"balance_usd"`
 	Inventory       []int     `json:"inventory"`
+	Businesses      []int     `json:"businesses"`
 	CreatedAt       time.Time `json:"created_at"`
 	LastAccrualAt   time.Time `json:"last_accrual_at"`
 	MiningWindowEnd time.Time `json:"mining_window_end"`
-	LastBotMsgID    int       `json:"last_bot_msg_id"`
+	LastBonusTime   time.Time `json:"last_bonus_time"`
+	FarmCapacity    int       `json:"farm_capacity"`
 }
 
 type Store struct {
@@ -49,14 +60,14 @@ type Store struct {
 }
 
 var (
-	bot         *tgbotapi.BotAPI
-	store       Store
-	storeMu     sync.RWMutex
-	catalog     []GPU
-	catalogByID map[int]GPU
+	bot        *tgbotapi.BotAPI
+	store      Store
+	storeMu    sync.RWMutex
+	gpuCatalog []GPU
+	bizCatalog []Business
+	gpuByID    map[int]GPU
+	bizByID    map[int]Business
 )
-
-// --- main ---
 
 func main() {
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
@@ -75,10 +86,17 @@ func main() {
 	}
 	loadOrInitStore()
 
-	catalog = buildCatalog()
-	catalogByID = map[int]GPU{}
-	for _, g := range catalog {
-		catalogByID[g.ID] = g
+	gpuCatalog = buildGPUCatalog()
+	bizCatalog = buildBusinessCatalog()
+
+	gpuByID = make(map[int]GPU)
+	for _, g := range gpuCatalog {
+		gpuByID[g.ID] = g
+	}
+
+	bizByID = make(map[int]Business)
+	for _, b := range bizCatalog {
+		bizByID[b.ID] = b
 	}
 
 	u := tgbotapi.NewUpdate(0)
@@ -94,8 +112,6 @@ func main() {
 	}
 }
 
-// --- Persistence ---
-
 func loadOrInitStore() {
 	storeMu.Lock()
 	defer storeMu.Unlock()
@@ -104,9 +120,17 @@ func loadOrInitStore() {
 		mustWriteJSON(usersFile, store)
 		return
 	}
-	f, _ := os.Open(usersFile)
+	f, err := os.Open(usersFile)
+	if err != nil {
+		log.Printf("Error opening users file: %v", err)
+		store = Store{Users: map[int64]*User{}}
+		return
+	}
 	defer f.Close()
-	json.NewDecoder(f).Decode(&store)
+	if err := json.NewDecoder(f).Decode(&store); err != nil {
+		log.Printf("Error decoding users file: %v", err)
+		store = Store{Users: map[int64]*User{}}
+	}
 }
 
 func saveStore() {
@@ -116,297 +140,611 @@ func saveStore() {
 }
 
 func mustWriteJSON(path string, v any) {
+	if err := os.MkdirAll("data", 0755); err != nil {
+		log.Printf("Error creating data directory: %v", err)
+		return
+	}
 	tmp := path + ".tmp"
-	f, _ := os.Create(tmp)
+	f, err := os.Create(tmp)
+	if err != nil {
+		log.Printf("Error creating temp file: %v", err)
+		return
+	}
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	enc.Encode(v)
+	if err := enc.Encode(v); err != nil {
+		log.Printf("Error encoding JSON: %v", err)
+	}
 	f.Close()
-	os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("Error renaming temp file: %v", err)
+	}
 }
-
-// --- User logic ---
 
 func ensureUser(id int64, username string) *User {
 	storeMu.Lock()
 	defer storeMu.Unlock()
 	u, ok := store.Users[id]
 	if !ok {
-		u = &User{ID: id, Username: username, Balance: startBalance,
-			CreatedAt: time.Now(), LastAccrualAt: time.Now(),
-			MiningWindowEnd: time.Now().Add(miningWindow)}
+		u = &User{
+			ID:            id,
+			Username:      username,
+			BalanceBTC:    startBalanceBTC,
+			BalanceUSD:    startBalanceUSD,
+			Inventory:     []int{},
+			Businesses:    []int{},
+			CreatedAt:     time.Now(),
+			LastAccrualAt: time.Now(),
+			LastBonusTime: time.Now().Add(-25 * time.Hour),
+			FarmCapacity:  95,
+		}
 		store.Users[id] = u
 	}
 	return u
 }
 
-func accrueOnInteraction(u *User) {
+func accrueEarnings(u *User) {
 	now := time.Now()
-	accrualEnd := u.MiningWindowEnd
-	if now.Before(accrualEnd) {
-		accrualEnd = now
-	}
-	if accrualEnd.After(u.LastAccrualAt) {
-		sec := accrualEnd.Sub(u.LastAccrualAt).Seconds()
-		u.Balance += totalRate(u) * sec
+	if now.Before(u.MiningWindowEnd) {
+		elapsed := now.Sub(u.LastAccrualAt)
+		minutes := elapsed.Minutes()
+
+		// Начисляем доход от майнинга
+		miningIncome := totalMiningRate(u) * (minutes / 10.0)
+		u.BalanceBTC += miningIncome
+
+		// Начисляем доход от бизнесов
+		businessIncome := totalBusinessIncome(u) * (minutes / 10.0)
+		u.BalanceBTC += businessIncome
 	}
 	u.LastAccrualAt = now
 	u.MiningWindowEnd = now.Add(miningWindow)
 }
 
-func totalRate(u *User) float64 {
-	var r float64
+func totalMiningRate(u *User) float64 {
+	var rate float64
 	for _, id := range u.Inventory {
-		if g, ok := catalogByID[id]; ok {
-			r += g.Rate
+		if g, ok := gpuByID[id]; ok {
+			rate += g.Rate
 		}
 	}
-	return r
+	return rate
 }
 
-// --- Handlers ---
+func totalBusinessIncome(u *User) float64 {
+	var income float64
+	for _, id := range u.Businesses {
+		if b, ok := bizByID[id]; ok {
+			income += b.Income
+		}
+	}
+	return income
+}
 
 func handleMessage(m *tgbotapi.Message) {
 	u := ensureUser(m.From.ID, m.From.UserName)
-	accrueOnInteraction(u)
+	accrueEarnings(u)
 	saveStore()
-	if m.Text == "/start" {
-		showMainMenu(u, m.Chat.ID)
+
+	cmd := m.Text
+	if strings.HasPrefix(cmd, "/") {
+		parts := strings.Split(cmd, " ")
+		switch parts[0] {
+		case "/start", "/menu":
+			sendMainMenu(u, m.Chat.ID)
+		case "/stats":
+			sendStats(u, m.Chat.ID)
+		case "/ref":
+			sendRefInfo(u, m.Chat.ID)
+		case "/business":
+			sendBusinesses(u, m.Chat.ID)
+		case "/btc_buy":
+			if len(parts) > 1 {
+				amount, _ := strconv.ParseFloat(parts[1], 64)
+				buyBTC(u, amount, m.Chat.ID)
+			} else {
+				sendMessage(m.Chat.ID, "Используйте: /btc_buy [количество]")
+			}
+		case "/btc_sell":
+			if len(parts) > 1 {
+				amount, _ := strconv.ParseFloat(parts[1], 64)
+				sellBTC(u, amount, m.Chat.ID)
+			} else {
+				sendMessage(m.Chat.ID, "Используйте: /btc_sell [количество]")
+			}
+		case "/join_chat":
+			sendJoinChatInfo(u, m.Chat.ID)
+		default:
+			sendMainMenu(u, m.Chat.ID)
+		}
 	} else {
-		showMainMenu(u, m.Chat.ID)
+		sendMainMenu(u, m.Chat.ID)
 	}
 }
 
 func handleCallback(cb *tgbotapi.CallbackQuery) {
 	u := ensureUser(cb.From.ID, cb.From.UserName)
-	accrueOnInteraction(u)
+	accrueEarnings(u)
 	data := cb.Data
 	chatID := cb.Message.Chat.ID
 	bot.Request(tgbotapi.NewCallback(cb.ID, ""))
 
 	switch {
-	case data == "menu":
-		showMainMenu(u, chatID)
-	case data == "balance":
-		showBalance(u, chatID)
-	case data == "mine":
-		showMine(u, chatID)
-	case strings.HasPrefix(data, "shop"):
-		page := 1
-		if strings.Contains(data, ":") {
-			p, _ := strconv.Atoi(strings.Split(data, ":")[1])
-			page = p
-		}
-		showShop(u, chatID, page)
-	case strings.HasPrefix(data, "buy"):
+	case data == "main_menu":
+		sendMainMenu(u, chatID)
+	case data == "stats":
+		sendStats(u, chatID)
+	case data == "ref":
+		sendRefInfo(u, chatID)
+	case data == "business":
+		sendBusinesses(u, chatID)
+	case data == "farm":
+		sendFarm(u, chatID)
+	case data == "shop":
+		sendShopMenu(u, chatID)
+	case data == "gpu_shop":
+		sendGPUShop(u, chatID, 1)
+	case data == "business_shop":
+		sendBusinessShop(u, chatID, 1)
+	case data == "daily_bonus":
+		claimDailyBonus(u, chatID)
+	case data == "convert_btc_usd":
+		convertAllBTCtoUSD(u, chatID)
+	case strings.HasPrefix(data, "buy_gpu:"):
 		id, _ := strconv.Atoi(strings.Split(data, ":")[1])
-		buyGPU(u, id)
-		showInventory(u, chatID)
-	case data == "inventory":
-		showInventory(u, chatID)
-	case strings.HasPrefix(data, "sell"):
+		buyGPU(u, id, chatID)
+	case strings.HasPrefix(data, "buy_biz:"):
 		id, _ := strconv.Atoi(strings.Split(data, ":")[1])
-		sellGPU(u, id)
-		showInventory(u, chatID)
-	case data == "reset":
-		u.Balance = startBalance
-		u.Inventory = []int{}
-		showMainMenu(u, chatID)
+		buyBusiness(u, id, chatID)
+	case strings.HasPrefix(data, "gpu_shop_page:"):
+		page, _ := strconv.Atoi(strings.Split(data, ":")[1])
+		sendGPUShop(u, chatID, page)
+	case strings.HasPrefix(data, "biz_shop_page:"):
+		page, _ := strconv.Atoi(strings.Split(data, ":")[1])
+		sendBusinessShop(u, chatID, page)
 	}
 	saveStore()
 }
 
-// --- UI Screens ---
+func sendMainMenu(u *User, chatID int64) {
+	text := fmt.Sprintf("🖥 *Симулятор майнера* 🖥\n\n")
+	text += fmt.Sprintf("• Вместимость фермы: %d/95\n", len(u.Inventory))
+	text += fmt.Sprintf("• Заработок фермы: %.5f BTC / 10 мин\n", totalMiningRate(u))
+	text += fmt.Sprintf("• Доход бизнесов: %.5f BTC / 10 мин\n", totalBusinessIncome(u))
+	text += fmt.Sprintf("• Баланс: %.5f BTC\n", u.BalanceBTC)
+	text += fmt.Sprintf("• Баланс: %.0f $\n\n", u.BalanceUSD)
+	text += fmt.Sprintf("Курс BTC: %.0f $ / 1 BTC", btcRate)
 
-func showMainMenu(u *User, chatID int64) {
-	text := fmt.Sprintf("Баланс: *%s %s*\nСкорость: *%s %s/сек*", fmtAmt(u.Balance), currency, fmtAmt(totalRate(u)), currency)
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("💰 Баланс", "balance"),
-			tgbotapi.NewInlineKeyboardButtonData("⛏ Добыча", "mine")),
+			tgbotapi.NewInlineKeyboardButtonData("📊 Личная статистика", "stats"),
+			tgbotapi.NewInlineKeyboardButtonData("🎁 Бонусы", "ref"),
+		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🛒 Магазин", "shop:1"),
-			tgbotapi.NewInlineKeyboardButtonData("🎒 Инвентарь", "inventory")),
+			tgbotapi.NewInlineKeyboardButtonData("🏢 Бизнесы", "business"),
+			tgbotapi.NewInlineKeyboardButtonData("🖥 Ферма", "farm"),
+		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("♻ Сброс", "reset")))
-	sendOrReplace(u, chatID, text, &kb)
+			tgbotapi.NewInlineKeyboardButtonData("🛒 Магазин", "shop"),
+			tgbotapi.NewInlineKeyboardButtonData("🎁 Ежедневный бонус", "daily_bonus"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("💸 Вывести BTC в USD", "convert_btc_usd"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("👥 Стать представителем", "join_chat"),
+		),
+	)
+
+	sendMessageWithKeyboard(chatID, text, kb)
 }
 
-func showBalance(u *User, chatID int64) {
-	text := fmt.Sprintf("Ваш баланс: *%s %s*", fmtAmt(u.Balance), currency)
+func sendStats(u *User, chatID int64) {
+	text := fmt.Sprintf("📊 *Личная статистика*\n\n")
+	text += fmt.Sprintf("• Игрок: @%s\n", u.Username)
+	text += fmt.Sprintf("• Видеокарты: %d/95\n", len(u.Inventory))
+	text += fmt.Sprintf("• Бизнесы: %d\n", len(u.Businesses))
+	text += fmt.Sprintf("• Общий доход: %.5f BTC / 10 мин\n", totalMiningRate(u)+totalBusinessIncome(u))
+	text += fmt.Sprintf("• Баланс BTC: %.5f\n", u.BalanceBTC)
+	text += fmt.Sprintf("• Баланс USD: %.0f\n", u.BalanceUSD)
+	text += fmt.Sprintf("• Играет с: %s\n", u.CreatedAt.Format("02.01.2006"))
+
 	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅ Назад", "menu")))
-	sendOrReplace(u, chatID, text, &kb)
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "main_menu"),
+		),
+	)
+
+	sendMessageWithKeyboard(chatID, text, kb)
 }
 
-func showMine(u *User, chatID int64) {
-	text := fmt.Sprintf("⛏ Ваша добыча активна! Скорость: *%s %s/сек*", fmtAmt(totalRate(u)), currency)
+func sendRefInfo(u *User, chatID int64) {
+	refLink := fmt.Sprintf("https://t.me/%s?start=ref%d", bot.Self.UserName, u.ID)
+
+	text := fmt.Sprintf("🎁 *Реферальная программа*\n\n")
+	text += fmt.Sprintf("Приглашайте друзей и получайте бонусы!\n\n")
+	text += fmt.Sprintf("Ваша реферальная ссылка:\n`%s`\n\n", refLink)
+	text += fmt.Sprintf("За каждого приглашенного друга вы получите:\n")
+	text += fmt.Sprintf("• 1000 $\n")
+	text += fmt.Sprintf("• 0.001 BTC\n")
+
 	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅ Назад", "menu")))
-	sendOrReplace(u, chatID, text, &kb)
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "main_menu"),
+		),
+	)
+
+	sendMessageWithKeyboard(chatID, text, kb)
 }
 
-func showShop(u *User, chatID int64, page int) {
+func sendBusinesses(u *User, chatID int64) {
+	text := fmt.Sprintf("🏢 *Ваши бизнесы*\n\n")
+
+	if len(u.Businesses) == 0 {
+		text += "У вас пока нет бизнесов. Приобретите их в магазине!\n"
+	} else {
+		for i, id := range u.Businesses {
+			if biz, ok := bizByID[id]; ok {
+				text += fmt.Sprintf("%d. %s - %.5f BTC/10мин\n", i+1, biz.Name, biz.Income)
+			}
+		}
+	}
+
+	text += fmt.Sprintf("\nОбщий доход от бизнесов: %.5f BTC/10мин", totalBusinessIncome(u))
+
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🛒 Магазин бизнесов", "business_shop"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "main_menu"),
+		),
+	)
+
+	sendMessageWithKeyboard(chatID, text, kb)
+}
+
+func sendFarm(u *User, chatID int64) {
+	text := fmt.Sprintf("🖥 *Ваша ферма*\n\n")
+	text += fmt.Sprintf("• Вместимость: %d/95\n", len(u.Inventory))
+	text += fmt.Sprintf("• Доход фермы: %.5f BTC/10мин\n", totalMiningRate(u))
+
+	if len(u.Inventory) == 0 {
+		text += "\nУ вас пока нет видеокарт. Приобретите их в магазине!"
+	} else {
+		text += "\nУстановленные видеокарты:\n"
+		for i, id := range u.Inventory {
+			if gpu, ok := gpuByID[id]; ok {
+				text += fmt.Sprintf("%d. %s - %.5f BTC/10мин\n", i+1, gpu.Name, gpu.Rate)
+			}
+		}
+	}
+
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🛒 Магазин видеокарт", "gpu_shop"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "main_menu"),
+		),
+	)
+
+	sendMessageWithKeyboard(chatID, text, kb)
+}
+
+func sendShopMenu(u *User, chatID int64) {
+	text := "🛒 *Магазин*\n\nВыбери, в какой отдел хочешь пойти:"
+
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("💻 Видеокарты", "gpu_shop"),
+			tgbotapi.NewInlineKeyboardButtonData("🏢 Бизнесы", "business_shop"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "main_menu"),
+		),
+	)
+
+	sendMessageWithKeyboard(chatID, text, kb)
+}
+
+func sendGPUShop(u *User, chatID int64, page int) {
 	start := (page - 1) * shopPageSize
 	end := start + shopPageSize
-	if end > len(catalog) {
-		end = len(catalog)
+	if end > len(gpuCatalog) {
+		end = len(gpuCatalog)
 	}
-	text := "🛒 Магазин видеокарт:\n"
-	rows := [][]tgbotapi.InlineKeyboardButton{}
-	for _, g := range catalog[start:end] {
-		text += fmt.Sprintf("%d. %s — %s %s (⛏ %s/сек)\n", g.ID, g.Name, fmtAmt(g.Price), currency, fmtAmt(g.Rate))
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Купить "+strconv.Itoa(g.ID), fmt.Sprintf("buy:%d", g.ID))))
+
+	text := "💻 *Магазин видеокарт*\n\n"
+	for _, gpu := range gpuCatalog[start:end] {
+		text += fmt.Sprintf("%s - %.0f $\n", gpu.Name, gpu.Price)
+		text += fmt.Sprintf("Доход: %.5f BTC/10мин\n\n", gpu.Rate)
 	}
-	nav := []tgbotapi.InlineKeyboardButton{}
-	if start > 0 {
-		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("⬅", fmt.Sprintf("shop:%d", page-1)))
+
+	text += fmt.Sprintf("Страница %d/%d", page, (len(gpuCatalog)+shopPageSize-1)/shopPageSize)
+
+	kbRows := make([][]tgbotapi.InlineKeyboardButton, 0)
+
+	for _, gpu := range gpuCatalog[start:end] {
+		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("Купить %s", gpu.Name),
+				fmt.Sprintf("buy_gpu:%d", gpu.ID),
+			),
+		))
 	}
-	if end < len(catalog) {
-		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("➡", fmt.Sprintf("shop:%d", page+1)))
+
+	// Добавляем навигацию
+	navRow := make([]tgbotapi.InlineKeyboardButton, 0)
+	if page > 1 {
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("gpu_shop_page:%d", page-1)))
 	}
-	if len(nav) > 0 {
-		rows = append(rows, nav)
+	if end < len(gpuCatalog) {
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("gpu_shop_page:%d", page+1)))
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅ Назад", "menu")))
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
-	sendOrReplace(u, chatID, text, &kb)
+	if len(navRow) > 0 {
+		kbRows = append(kbRows, navRow)
+	}
+
+	kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ В главное меню", "main_menu"),
+	))
+
+	kb := tgbotapi.NewInlineKeyboardMarkup(kbRows...)
+	sendMessageWithKeyboard(chatID, text, kb)
 }
 
-func showInventory(u *User, chatID int64) {
-	if len(u.Inventory) == 0 {
-		sendOrReplace(u, chatID, "🎒 Ваш инвентарь пуст.", &tgbotapi.InlineKeyboardMarkup{
-			InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{{tgbotapi.NewInlineKeyboardButtonData("⬅ Назад", "menu")}},
-		})
-		return
+func sendBusinessShop(u *User, chatID int64, page int) {
+	start := (page - 1) * shopPageSize
+	end := start + shopPageSize
+	if end > len(bizCatalog) {
+		end = len(bizCatalog)
 	}
-	text := "🎒 Ваши видеокарты:\n"
-	rows := [][]tgbotapi.InlineKeyboardButton{}
-	for _, id := range u.Inventory {
-		g := catalogByID[id]
-		text += fmt.Sprintf("- %s (⛏ %s/сек)\n", g.Name, fmtAmt(g.Rate))
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Продать "+strconv.Itoa(g.ID), fmt.Sprintf("sell:%d", g.ID))))
+
+	text := "🏢 *Магазин бизнесов*\n\n"
+	for _, biz := range bizCatalog[start:end] {
+		text += fmt.Sprintf("%s - %.0f $\n", biz.Name, biz.Price)
+		text += fmt.Sprintf("Доход: %.5f BTC/10мин\n\n", biz.Income)
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅ Назад", "menu")))
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
-	sendOrReplace(u, chatID, text, &kb)
+
+	text += fmt.Sprintf("Страница %d/%d", page, (len(bizCatalog)+shopPageSize-1)/shopPageSize)
+
+	kbRows := make([][]tgbotapi.InlineKeyboardButton, 0)
+
+	for _, biz := range bizCatalog[start:end] {
+		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("Купить %s", biz.Name),
+				fmt.Sprintf("buy_biz:%d", biz.ID),
+			),
+		))
+	}
+
+	// Добавляем навигацию
+	navRow := make([]tgbotapi.InlineKeyboardButton, 0)
+	if page > 1 {
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("biz_shop_page:%d", page-1)))
+	}
+	if end < len(bizCatalog) {
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("biz_shop_page:%d", page+1)))
+	}
+	if len(navRow) > 0 {
+		kbRows = append(kbRows, navRow)
+	}
+
+	kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ В главное меню", "main_menu"),
+	))
+
+	kb := tgbotapi.NewInlineKeyboardMarkup(kbRows...)
+	sendMessageWithKeyboard(chatID, text, kb)
 }
 
-// --- Game actions ---
-
-func buyGPU(u *User, id int) {
-	g, ok := catalogByID[id]
-	if !ok || u.Balance < g.Price {
+func claimDailyBonus(u *User, chatID int64) {
+	now := time.Now()
+	if now.Sub(u.LastBonusTime) < 24*time.Hour {
+		timeLeft := 24*time.Hour - now.Sub(u.LastBonusTime)
+		text := fmt.Sprintf("🎁 Вы уже получали ежедневный бонус сегодня\n\nСледующий бонус через: %.0f часов", timeLeft.Hours())
+		sendMessage(chatID, text)
 		return
 	}
-	u.Balance -= g.Price
+
+	bonusBTC := 0.001
+	u.BalanceBTC += bonusBTC
+	u.LastBonusTime = now
+
+	text := fmt.Sprintf("🎁 *Ежедневный бонус получен!*\n\n+%.5f BTC", bonusBTC)
+	sendMessage(chatID, text)
+}
+
+func convertAllBTCtoUSD(u *User, chatID int64) {
+	if u.BalanceBTC <= 0 {
+		sendMessage(chatID, "У вас нет BTC для конвертации")
+		return
+	}
+
+	usdAmount := u.BalanceBTC * btcRate
+	u.BalanceUSD += usdAmount
+	u.BalanceBTC = 0
+
+	text := fmt.Sprintf("💸 *Конвертация завершена*\n\nВы конвертировали все свои BTC в USD\nПолучено: %.0f $", usdAmount)
+	sendMessage(chatID, text)
+}
+
+func buyGPU(u *User, id int, chatID int64) {
+	gpu, exists := gpuByID[id]
+	if !exists {
+		sendMessage(chatID, "Эта видеокарта не найдена")
+		return
+	}
+
+	if u.BalanceUSD < gpu.Price {
+		sendMessage(chatID, "Недостаточно средств для покупки")
+		return
+	}
+
+	if len(u.Inventory) >= u.FarmCapacity {
+		sendMessage(chatID, "Достигнут лимит фермы. Нельзя купить больше видеокарт")
+		return
+	}
+
+	u.BalanceUSD -= gpu.Price
 	u.Inventory = append(u.Inventory, id)
+
+	text := fmt.Sprintf("✅ *Покупка совершена*\n\nВы приобрели: %s\nПотрачено: %.0f $\nДоход: %.5f BTC/10мин",
+		gpu.Name, gpu.Price, gpu.Rate)
+	sendMessage(chatID, text)
 }
 
-func sellGPU(u *User, id int) {
-	g, ok := catalogByID[id]
-	if !ok {
+func buyBusiness(u *User, id int, chatID int64) {
+	biz, exists := bizByID[id]
+	if !exists {
+		sendMessage(chatID, "Этот бизнес не найден")
 		return
 	}
-	for i, x := range u.Inventory {
-		if x == id {
-			u.Inventory = append(u.Inventory[:i], u.Inventory[i+1:]...)
-			u.Balance += g.Price * 0.5
+
+	if u.BalanceUSD < biz.Price {
+		sendMessage(chatID, "Недостаточно средств для покупки")
+		return
+	}
+
+	// Проверяем, нет ли уже такого бизнеса
+	for _, bizID := range u.Businesses {
+		if bizID == id {
+			sendMessage(chatID, "У вас уже есть этот бизнес")
 			return
 		}
 	}
+
+	u.BalanceUSD -= biz.Price
+	u.Businesses = append(u.Businesses, id)
+
+	text := fmt.Sprintf("✅ *Покупка совершена*\n\nВы приобрели: %s\nПотрачено: %.0f $\nДоход: %.5f BTC/10мин",
+		biz.Name, biz.Price, biz.Income)
+	sendMessage(chatID, text)
 }
 
-// --- Helpers ---
-
-func sendOrReplace(u *User, chatID int64, text string, kb *tgbotapi.InlineKeyboardMarkup) {
-	if u.LastBotMsgID != 0 {
-		edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, u.LastBotMsgID, text, *kb)
-		edit.ParseMode = "Markdown"
-		if _, err := bot.Request(edit); err == nil {
-			return
-		}
+func buyBTC(u *User, amount float64, chatID int64) {
+	cost := amount * btcRate
+	if u.BalanceUSD < cost {
+		sendMessage(chatID, "Недостаточно USD для покупки BTC")
+		return
 	}
+
+	u.BalanceUSD -= cost
+	u.BalanceBTC += amount
+
+	text := fmt.Sprintf("✅ *Покупка BTC совершена*\n\nКуплено: %.5f BTC\nПотрачено: %.0f $", amount, cost)
+	sendMessage(chatID, text)
+}
+
+func sellBTC(u *User, amount float64, chatID int64) {
+	if u.BalanceBTC < amount {
+		sendMessage(chatID, "Недостаточно BTC для продажи")
+		return
+	}
+
+	income := amount * btcRate
+	u.BalanceBTC -= amount
+	u.BalanceUSD += income
+
+	text := fmt.Sprintf("✅ *Продажа BTC совершена*\n\nПродано: %.5f BTC\nПолучено: %.0f $", amount, income)
+	sendMessage(chatID, text)
+}
+
+func sendJoinChatInfo(u *User, chatID int64) {
+	text := "👥 *Стать представителем чата*\n\n"
+	text += "Чтобы стать представителем этого чата и получать комиссию с покупок участников, свяжитесь с администратором.\n\n"
+	text += "Для получения дополнительной информации отправьте сообщение @admin"
+
+	sendMessage(chatID, text)
+}
+
+func sendMessage(chatID int64, text string) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "Markdown"
+	bot.Send(msg)
+}
+
+func sendMessageWithKeyboard(chatID int64, text string, kb tgbotapi.InlineKeyboardMarkup) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
 	msg.ReplyMarkup = kb
-	sent, _ := bot.Send(msg)
-	u.LastBotMsgID = sent.MessageID
+	bot.Send(msg)
 }
 
-func fmtAmt(v float64) string {
-	s := strconv.FormatFloat(v, 'f', ratesDecimals, 64)
-	s = strings.TrimRight(s, "0")
-	if strings.HasSuffix(s, ".") {
-		s += "0"
-	}
-	return s
-}
-
-// --- Catalog (сокращено для примера, у тебя уже есть 60 штук) ---
-func buildCatalog() []GPU {
+func buildGPUCatalog() []GPU {
 	return []GPU{
-		{1, "GeForce GT 710 1GB", 0.0000010, 5},
-		{2, "GeForce GT 730 2GB", 0.0000018, 9},
-		{3, "GeForce GTX 750 Ti", 0.0000035, 15},
-		{4, "GeForce GTX 950", 0.0000070, 30},
-		{5, "GeForce GTX 960", 0.0000120, 50},
-		{6, "GeForce GTX 970", 0.0000200, 80},
-		{7, "GeForce GTX 980", 0.0000300, 120},
-		{8, "GeForce GTX 1050 Ti", 0.0000450, 180},
-		{9, "GeForce GTX 1060 3GB", 0.0000700, 280},
-		{10, "GeForce GTX 1060 6GB", 0.0000900, 360},
-		{11, "GeForce GTX 1070", 0.0001300, 520},
-		{12, "GeForce GTX 1070 Ti", 0.0001500, 600},
-		{13, "GeForce GTX 1080", 0.0001800, 720},
-		{14, "GeForce GTX 1080 Ti", 0.0002500, 1000},
-		{15, "GeForce RTX 2060", 0.0003000, 1200},
-		{16, "GeForce RTX 2060 Super", 0.0003500, 1400},
-		{17, "GeForce RTX 2070", 0.0004000, 1600},
-		{18, "GeForce RTX 2070 Super", 0.0004500, 1800},
-		{19, "GeForce RTX 2080", 0.0005000, 2000},
-		{20, "GeForce RTX 2080 Super", 0.0005500, 2200},
-		{21, "GeForce RTX 2080 Ti", 0.0007000, 2800},
-		{22, "GeForce RTX 3050", 0.0008000, 3200},
-		{23, "GeForce RTX 3060", 0.0010000, 4000},
-		{24, "GeForce RTX 3060 Ti", 0.0012000, 4800},
-		{25, "GeForce RTX 3070", 0.0015000, 6000},
-		{26, "GeForce RTX 3070 Ti", 0.0017000, 6800},
-		{27, "GeForce RTX 3080 10GB", 0.0020000, 8000},
-		{28, "GeForce RTX 3080 12GB", 0.0022000, 8800},
-		{29, "GeForce RTX 3080 Ti", 0.0025000, 10000},
-		{30, "GeForce RTX 3090", 0.0030000, 12000},
-		{31, "GeForce RTX 3090 Ti", 0.0035000, 14000},
-		{32, "GeForce RTX 4060", 0.0040000, 16000},
-		{33, "GeForce RTX 4060 Ti", 0.0045000, 18000},
-		{34, "GeForce RTX 4070", 0.0050000, 20000},
-		{35, "GeForce RTX 4070 Ti", 0.0060000, 24000},
-		{36, "GeForce RTX 4080", 0.0075000, 30000},
-		{37, "GeForce RTX 4080 Super", 0.0080000, 32000},
-		{38, "GeForce RTX 4090", 0.0100000, 40000},
-		{39, "GeForce RTX 4090 Ti", 0.0120000, 48000},
-		{40, "Radeon RX 460", 0.0000050, 20},
-		{41, "Radeon RX 470", 0.0000150, 60},
-		{42, "Radeon RX 480", 0.0000250, 100},
-		{43, "Radeon RX 550", 0.0000080, 32},
-		{44, "Radeon RX 560", 0.0000120, 48},
-		{45, "Radeon RX 570", 0.0000300, 120},
-		{46, "Radeon RX 580", 0.0000450, 180},
-		{47, "Radeon RX 590", 0.0000600, 240},
-		{48, "Radeon RX Vega 56", 0.0001000, 400},
-		{49, "Radeon RX Vega 64", 0.0001300, 520},
-		{50, "Radeon VII", 0.0002000, 800},
-		{51, "Radeon RX 5500 XT", 0.0002500, 1000},
-		{52, "Radeon RX 5600 XT", 0.0003000, 1200},
-		{53, "Radeon RX 5700", 0.0003500, 1400},
-		{54, "Radeon RX 5700 XT", 0.0004000, 1600},
-		{55, "Radeon RX 6600", 0.0005000, 2000},
-		{56, "Radeon RX 6600 XT", 0.0006000, 2400},
-		{57, "Radeon RX 6700 XT", 0.0008000, 3200},
-		{58, "Radeon RX 6800", 0.0010000, 4000},
-		{59, "Radeon RX 6800 XT", 0.0012000, 4800},
-		{60, "Radeon RX 6900 XT", 0.0015000, 6000},
+		{1, "GeForce GT 710 1GB", 0.0000010, 50},
+		{2, "GeForce GT 730 2GB", 0.0000018, 90},
+		{3, "GeForce GTX 750 Ti", 0.0000035, 150},
+		{4, "GeForce GTX 950", 0.0000070, 300},
+		{5, "GeForce GTX 960", 0.0000120, 500},
+		{6, "GeForce GTX 970", 0.0000200, 800},
+		{7, "GeForce GTX 980", 0.0000300, 1200},
+		{8, "GeForce GTX 1050 Ti", 0.0000450, 1800},
+		{9, "GeForce GTX 1060 3GB", 0.0000700, 2800},
+		{10, "GeForce GTX 1060 6GB", 0.0000900, 3600},
+		{11, "GeForce GTX 1070", 0.0001300, 5200},
+		{12, "GeForce GTX 1070 Ti", 0.0001500, 6000},
+		{13, "GeForce GTX 1080", 0.0001800, 7200},
+		{14, "GeForce GTX 1080 Ti", 0.0002500, 10000},
+		{15, "GeForce RTX 2060", 0.0003000, 12000},
+		{16, "GeForce RTX 2060 Super", 0.0003500, 14000},
+		{17, "GeForce RTX 2070", 0.0004000, 16000},
+		{18, "GeForce RTX 2070 Super", 0.0004500, 18000},
+		{19, "GeForce RTX 2080", 0.0005000, 20000},
+		{20, "GeForce RTX 2080 Super", 0.0005500, 22000},
+		{21, "GeForce RTX 2080 Ti", 0.0007000, 28000},
+		{22, "GeForce RTX 3050", 0.0008000, 32000},
+		{23, "GeForce RTX 3060", 0.0010000, 40000},
+		{24, "GeForce RTX 3060 Ti", 0.0012000, 48000},
+		{25, "GeForce RTX 3070", 0.0015000, 60000},
+		{26, "GeForce RTX 3070 Ti", 0.0017000, 68000},
+		{27, "GeForce RTX 3080 10GB", 0.0020000, 80000},
+		{28, "GeForce RTX 3080 12GB", 0.0022000, 88000},
+		{29, "GeForce RTX 3080 Ti", 0.0025000, 100000},
+		{30, "GeForce RTX 3090", 0.0030000, 120000},
+		{31, "GeForce RTX 3090 Ti", 0.0035000, 140000},
+		{32, "GeForce RTX 4060", 0.0040000, 160000},
+		{33, "GeForce RTX 4060 Ti", 0.0045000, 180000},
+		{34, "GeForce RTX 4070", 0.0050000, 200000},
+		{35, "GeForce RTX 4070 Ti", 0.0060000, 240000},
+		{36, "GeForce RTX 4080", 0.0075000, 300000},
+		{37, "GeForce RTX 4080 Super", 0.0080000, 320000},
+		{38, "GeForce RTX 4090", 0.0100000, 400000},
+		{39, "GeForce RTX 4090 Ti", 0.0120000, 480000},
+		{40, "Radeon RX 460", 0.0000050, 200},
+		{41, "Radeon RX 470", 0.0000150, 600},
+		{42, "Radeon RX 480", 0.0000250, 1000},
+		{43, "Radeon RX 550", 0.0000080, 320},
+		{44, "Radeon RX 560", 0.0000120, 480},
+		{45, "Radeon RX 570", 0.0000300, 1200},
+		{46, "Radeon RX 580", 0.0000450, 1800},
+		{47, "Radeon RX 590", 0.0000600, 2400},
+		{48, "Radeon RX Vega 56", 0.0001000, 4000},
+		{49, "Radeon RX Vega 64", 0.0001300, 5200},
+		{50, "Radeon VII", 0.0002000, 8000},
+		{51, "Radeon RX 5500 XT", 0.0002500, 10000},
+		{52, "Radeon RX 5600 XT", 0.0003000, 12000},
+		{53, "Radeon RX 5700", 0.0003500, 14000},
+		{54, "Radeon RX 5700 XT", 0.0004000, 16000},
+		{55, "Radeon RX 6600", 0.0005000, 20000},
+		{56, "Radeon RX 6600 XT", 0.0006000, 24000},
+		{57, "Radeon RX 6700 XT", 0.0008000, 32000},
+		{58, "Radeon RX 6800", 0.0010000, 40000},
+		{59, "Radeon RX 6800 XT", 0.0012000, 48000},
+		{60, "Radeon RX 6900 XT", 0.0015000, 60000},
+	}
+}
+
+func buildBusinessCatalog() []Business {
+	return []Business{
+		{1, "Небольшая ферма", 0.005, 5000},
+		{2, "Средняя ферма", 0.015, 15000},
+		{3, "Крупная ферма", 0.030, 30000},
+		{4, "Криптообменник", 0.050, 50000},
+		{5, "Майнинг-отель", 0.100, 100000},
+		{6, "Криптофонд", 0.200, 200000},
+		{7, "Блокчейн стартап", 0.500, 500000},
+		{8, "Криптобиржа", 1.000, 1000000},
+		{9, "Международная майнинговая компания", 2.000, 2000000},
+		{10, "Глобальный блокчейн-холдинг", 5.000, 5000000},
 	}
 }
